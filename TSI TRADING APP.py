@@ -328,8 +328,12 @@ def compute_indicators(
         "SLOPE": slope,
         "IS_UP": is_up
     }
+
+
+
+
 # ================================================================
-# SECTION 5 — STRATEGY ENGINE (TSI STRATEGY + TRADE LOGIC)
+# SECTION 5 — STRATEGY ENGINE (TSI STRATEGY + TRADE LOGIC) — UPDATED WITH STOP LOSS
 # ================================================================
 
 def run_tsi_strategy(
@@ -338,6 +342,7 @@ def run_tsi_strategy(
         shortLen=13,
         signalLen=13,
         tp_percent=0.004,     # 0.4% = 0.004
+        sl_percent=0.002,     # 0.2% = 0.002  <<< NEW STOP LOSS
         maxTradeDays=7,
         maType="EMA",
         maLength=50,
@@ -345,11 +350,11 @@ def run_tsi_strategy(
         minSlope=0.01):
 
     """
-    Runs the TradingView TSI strategy on a pandas DataFrame.
+    FULL STOP LOSS VERSION
 
-    Returns:
-        trades: list of dicts
-        df: same df but with indicators included
+    - Adds stop loss exit
+    - Adds "reason": "TP" or "SL"
+    - Used for ALL backtests, optimizer trials, and strategy apply
     """
 
     # --- Calculate Indicators ---
@@ -380,7 +385,7 @@ def run_tsi_strategy(
         row = df.iloc[i]
         prev = df.iloc[i - 1]
 
-        # Skip until all indicators are ready
+        # Skip until indicators are ready
         if pd.isna(row["TSI"]) or pd.isna(row["TREND_MA"]):
             continue
 
@@ -388,11 +393,12 @@ def run_tsi_strategy(
         if not row["IS_UP"]:
             continue
 
-        # TSI crossover
-        longCondition = (row["TSI"] > row["TSI_SIGNAL"]) and (prev["TSI"] <= prev["TSI_SIGNAL"])
+        # TSI crossover entry signal
+        longCondition = (row["TSI"] > row["TSI_SIGNAL"]) and \
+                        (prev["TSI"] <= prev["TSI_SIGNAL"])
 
-        # Trade-day logic
-        d = row.name  # timestamp index
+        # Day limiter logic
+        d = row.name
         date_key = (d.year, d.month, d.day)
 
         if longCondition and date_key != last_day:
@@ -412,116 +418,33 @@ def run_tsi_strategy(
                 "price": entry_price
             })
 
-        # EXIT (TP)
+        # EXIT CONDITIONS (TP or SL)
         if in_position:
-            take_profit_price = entry_price * (1 + tp_percent)
+            tp_price = entry_price * (1 + tp_percent)
+            sl_price = entry_price * (1 - sl_percent)
 
-            if row["close"] >= take_profit_price:
+            # TAKE PROFIT
+            if row["close"] >= tp_price:
                 in_position = False
                 trades.append({
                     "type": "SELL",
                     "time": row.name,
-                    "price": row["close"]
+                    "price": row["close"],
+                    "reason": "TP"
                 })
 
-    return trades, df
-# ================================================================
-# SECTION 5 — STRATEGY ENGINE (TSI STRATEGY + TRADE LOGIC)
-# ================================================================
-
-def run_tsi_strategy(
-        df,
-        longLen=25,
-        shortLen=13,
-        signalLen=13,
-        tp_percent=0.004,     # 0.4% = 0.004
-        maxTradeDays=7,
-        maType="EMA",
-        maLength=50,
-        trendSlopeLen=5,
-        minSlope=0.01):
-
-    """
-    Runs the TradingView TSI strategy on a pandas DataFrame.
-
-    Returns:
-        trades: list of dicts
-        df: same df but with indicators included
-    """
-
-    # --- Calculate Indicators ---
-    ind = compute_indicators(
-        df,
-        longLen,
-        shortLen,
-        signalLen,
-        maType,
-        maLength,
-        trendSlopeLen,
-        minSlope
-    )
-
-    df["TSI"] = ind["TSI"]
-    df["TSI_SIGNAL"] = ind["TSI_SIGNAL"]
-    df["TREND_MA"] = ind["TREND_MA"]
-    df["SLOPE"] = ind["SLOPE"]
-    df["IS_UP"] = ind["IS_UP"]
-
-    trades = []
-    in_position = False
-    entry_price = None
-    last_day = None
-    trade_days = 0
-
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i - 1]
-
-        # Skip until all indicators are ready
-        if pd.isna(row["TSI"]) or pd.isna(row["TREND_MA"]):
-            continue
-
-        # Trend filter
-        if not row["IS_UP"]:
-            continue
-
-        # TSI crossover
-        longCondition = (row["TSI"] > row["TSI_SIGNAL"]) and (prev["TSI"] <= prev["TSI_SIGNAL"])
-
-        # Trade-day logic
-        d = row.name  # timestamp index
-        date_key = (d.year, d.month, d.day)
-
-        if longCondition and date_key != last_day:
-            trade_days += 1
-            last_day = date_key
-
-        if trade_days > maxTradeDays:
-            continue
-
-        # ENTRY
-        if longCondition and not in_position:
-            entry_price = row["close"]
-            in_position = True
-            trades.append({
-                "type": "BUY",
-                "time": row.name,
-                "price": entry_price
-            })
-
-        # EXIT (TP)
-        if in_position:
-            take_profit_price = entry_price * (1 + tp_percent)
-
-            if row["close"] >= take_profit_price:
+            # STOP LOSS
+            elif row["close"] <= sl_price:
                 in_position = False
                 trades.append({
                     "type": "SELL",
                     "time": row.name,
-                    "price": row["close"]
+                    "price": row["close"],
+                    "reason": "SL"
                 })
 
     return trades, df
+
 
 # ================================================================
 # SECTION 6 — BACKTESTER (PNL, WIN RATE, MAX DRAWDOWN)
@@ -600,7 +523,6 @@ def compute_backtest_metrics(trades, df):
         "num_trades": len(pnl_list)
     }
 
-
 def backtest_strategy(df, strategy_params=None):
     """
     Runs the TSI strategy over historical data and returns:
@@ -617,6 +539,7 @@ def backtest_strategy(df, strategy_params=None):
         shortLen=strategy_params.get("shortLen", 13),
         signalLen=strategy_params.get("signalLen", 13),
         tp_percent=strategy_params.get("tp_percent", 0.004),
+        sl_percent=strategy_params.get("sl_percent", 0.002),   # NEW!
         maxTradeDays=strategy_params.get("maxTradeDays", 7),
         maType=strategy_params.get("maType", "EMA"),
         maLength=strategy_params.get("maLength", 50),
@@ -627,8 +550,6 @@ def backtest_strategy(df, strategy_params=None):
     metrics = compute_backtest_metrics(trades, df)
 
     return trades, df, metrics
-
-
 
 # ================================================================
 # SECTION 7 — ORDER EXECUTION SIMULATOR
@@ -752,50 +673,63 @@ class OrderSimulator:
             "qty_filled": total_qty,
             "fee_paid": fee,
         }
+
+
+
 # ================================================================
-# SECTION 8 — CONFIG SAVE / LOAD (JSON SETTINGS SYSTEM)
+# SECTION 8 — CONFIG SAVE / LOAD (JSON SETTINGS SYSTEM) — FIXED
 # ================================================================
 
 class ConfigManager:
     """
-    Simple JSON-based config storage.
-
-    Example usage:
-        cfg = ConfigManager.load()
-        cfg["longLen"] = 25
-        ConfigManager.save(cfg)
+    JSON-based config storage with automatic key backfilling.
     """
 
     CONFIG_FILE = "strategy_config.json"
 
+    # Master defaults — ALL required keys go here.
+    DEFAULTS = {
+        "symbol": DEFAULT_SYMBOL,
+        "interval": DEFAULT_INTERVAL,
+        "longLen": 25,
+        "shortLen": 13,
+        "signalLen": 13,
+        "tp_percent": 0.004,
+        "sl_percent": 0.002,        # << REQUIRED: STOP LOSS
+        "maxTradeDays": 7,
+        "maType": "EMA",
+        "maLength": 50,
+        "trendSlopeLen": 5,
+        "minSlope": 0.01,
+        "slippage_pct": 0.0002,
+        "fee_pct": 0.0004,
+        "partial_fill": True,
+        "partial_fill_steps": 3,
+        "latency_ms": 150,
+    }
+
     @staticmethod
     def load():
+        """
+        Loads config and automatically inserts ANY missing keys.
+        Ensures KeyError can NEVER occur.
+        """
         try:
             with open(ConfigManager.CONFIG_FILE, "r") as f:
-                return json.load(f)
-        except FileNotFoundError:
-            # default config if no file
-            return {
-                "symbol": DEFAULT_SYMBOL,
-                "interval": DEFAULT_INTERVAL,
-                "longLen": 25,
-                "shortLen": 13,
-                "signalLen": 13,
-                "tp_percent": 0.004,       # 0.4%
-                "maxTradeDays": 7,
-                "maType": "EMA",
-                "maLength": 50,
-                "trendSlopeLen": 5,
-                "minSlope": 0.01,
-                "slippage_pct": 0.0002,
-                "fee_pct": 0.0004,
-                "partial_fill": True,
-                "partial_fill_steps": 3,
-                "latency_ms": 150,
-            }
-        except Exception as e:
-            print("Config load error:", e)
-            return {}
+                cfg = json.load(f)
+        except:
+            # If file missing or corrupted → start fresh
+            cfg = {}
+
+        # ---- ALWAYS ENSURE ALL KEYS EXIST ----
+        for k, v in ConfigManager.DEFAULTS.items():
+            if k not in cfg:
+                cfg[k] = v
+
+        # ---- Save repaired config ----
+        ConfigManager.save(cfg)
+
+        return cfg
 
     @staticmethod
     def save(cfg: dict):
@@ -806,232 +740,6 @@ class ConfigManager:
         except Exception as e:
             print("Config save error:", e)
             return False
-
-
-
-
-
-# ================================================================
-# SECTION 9 — TRADINGVIEW-STYLE CHART WIDGET (BULLETPROOF VERSION)
-# ================================================================
-
-import pyqtgraph as pg
-from PySide6.QtWidgets import QWidget, QVBoxLayout
-import numpy as np
-
-
-class CandlestickItem(pg.GraphicsObject):
-    """
-    High-performance candlestick renderer for pyqtgraph.
-    Handles 1000–5000 candles smoothly.
-    """
-
-    def __init__(self, data):
-        super().__init__()
-        self.data = data  # numpy array: [i, open, close, low, high]
-        self.generate_picture()
-
-    def generate_picture(self):
-        """Build QPicture for fast repaint."""
-        self.picture = pg.QtGui.QPicture()
-        p = pg.QtGui.QPainter(self.picture)
-
-        w = 0.35  # candle half-width
-
-        for (i, open_, close_, low_, high_) in self.data:
-            # Colors
-            if close_ >= open_:
-                pen = pg.mkPen('#00ff00')   # bullish
-                brush = pg.mkBrush('#00ff00')
-            else:
-                pen = pg.mkPen('#ff0000')   # bearish
-                brush = pg.mkBrush('#ff0000')
-
-            p.setPen(pen)
-            p.setBrush(brush)
-
-            # Wick
-            p.drawLine(pg.QtCore.QPointF(i, low_),
-                       pg.QtCore.QPointF(i, high_))
-
-            # Body
-            p.drawRect(pg.QtCore.QRectF(i - w, open_, w * 2, (close_ - open_)))
-
-        p.end()
-
-    def paint(self, p, *args):
-        p.drawPicture(0, 0, self.picture)
-
-    def boundingRect(self):
-        return self.picture.boundingRect()
-
-
-class ChartWidget(QWidget):
-    """
-    TradingView-style chart:
-        ✓ Raw OHLC data ONLY
-        ✓ Candles
-        ✓ Indicators
-        ✓ Buy/Sell markers
-        ✓ Live updates without breaking dataframe
-    """
-
-    def __init__(self):
-        super().__init__()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.plot = pg.PlotWidget()
-        self.plot.setBackground('#111')
-        self.plot.showGrid(x=True, y=True)
-        layout.addWidget(self.plot)
-
-        self.df = None  # RAW OHLC ONLY
-        self.candle_item = None
-        self.indicator_items = []
-        self.trade_markers = []
-
-        self.autoscroll = True
-
-    # -------------------------------------------------------------
-    # INITIAL FULL DRAW
-    # -------------------------------------------------------------
-    def plot_dataframe(self, df):
-        """Draw full OHLC dataset (no indicators)."""
-        self.df = df.copy()
-
-        arr = np.column_stack([
-            np.arange(len(df)),
-            df["open"].values,
-            df["close"].values,
-            df["low"].values,
-            df["high"].values
-        ])
-
-        if self.candle_item:
-            self.plot.removeItem(self.candle_item)
-
-        self.candle_item = CandlestickItem(arr)
-        self.plot.addItem(self.candle_item)
-
-        self.plot.enableAutoRange(axis='x', enable=True)
-        self.plot.enableAutoRange(axis='y', enable=True)
-
-    # -------------------------------------------------------------
-    # REAL-TIME LIVE CANDLE UPDATE (FIXED)
-    # -------------------------------------------------------------
-    def update_live_candle(self, candle):
-        """
-        Update or append a live OHLC candle.
-        This version is BULLETPROOF — it NEVER corrupts df.
-        """
-
-        if self.df is None or len(self.df) == 0:
-            return
-
-        ts = candle["time"]
-        o = float(candle["open"])
-        h = float(candle["high"])
-        l = float(candle["low"])
-        c = float(candle["close"])
-        v = float(candle["volume"])
-
-        # FIXED: Ensure df has ONLY raw OHLC columns
-        raw_cols = ["open", "high", "low", "close", "volume"]
-        self.df = self.df[raw_cols].astype(float)
-
-        # Determine if candle updates last row or appends new one
-        last_ts = self.df.index[-1]
-
-        if ts == last_ts:
-            # Update existing OHLC row
-            self.df.loc[last_ts] = [o, h, l, c, v]
-        else:
-            # Append new candle
-            self.df.loc[ts] = [o, h, l, c, v]
-            self.df.sort_index(inplace=True)
-
-        # Rebuild candle array
-        arr = np.column_stack([
-            np.arange(len(self.df)),
-            self.df["open"].values,
-            self.df["close"].values,
-            self.df["low"].values,
-            self.df["high"].values
-        ])
-
-        self.candle_item.data = arr
-        self.candle_item.generate_picture()
-
-        # FIXED: TradingView-style autoscroll
-        if self.autoscroll:
-            self.plot.enableAutoRange(axis='x', enable=True)
-            self.plot.enableAutoRange(axis='y', enable=True)
-
-    # -------------------------------------------------------------
-    # INDICATORS
-    # -------------------------------------------------------------
-    def plot_indicator(self, series, color="#ffaa00", width=2):
-        if series is None or len(series) == 0:
-            return
-
-        x = np.arange(len(series))
-        y = series.values
-
-        item = self.plot.plot(x, y, pen=pg.mkPen(color, width=width))
-        self.indicator_items.append(item)
-
-    def clear_indicators(self):
-        for item in self.indicator_items:
-            try:
-                self.plot.removeItem(item)
-            except:
-                pass
-        self.indicator_items = []
-
-    # -------------------------------------------------------------
-    # TRADE MARKERS
-    # -------------------------------------------------------------
-    def plot_trades(self, trades):
-        # Remove old
-        for m in self.trade_markers:
-            try:
-                self.plot.removeItem(m)
-            except:
-                pass
-        self.trade_markers = []
-
-        if not trades:
-            return
-
-        for t in trades:
-            idx = self.df.index.get_loc(t["time"])
-            price = t["price"]
-
-            if t["type"] == "BUY":
-                marker = self.plot.plot(
-                    [idx], [price],
-                    pen=None,
-                    symbol="t1",
-                    symbolSize=12,
-                    symbolBrush="#00ff00"
-                )
-            else:
-                marker = self.plot.plot(
-                    [idx], [price],
-                    pen=None,
-                    symbol="t",
-                    symbolSize=12,
-                    symbolBrush="#ff0000"
-                )
-
-            self.trade_markers.append(marker)
-
-
-
-
-
 
 
 
@@ -1279,8 +987,12 @@ class IndicatorPanel(QWidget):
 
         if self.signal_item:
             self.signal_item.setData(x, self.df["TSI_SIGNAL"].values)
+
+
+
+
 # ================================================================
-# SECTION 11 — STRATEGY EDITOR PANEL (USER CONFIG CONTROLS)
+# SECTION 11 — STRATEGY EDITOR PANEL (USER CONFIG CONTROLS, STOP LOSS, FIXED ORDER)
 # ================================================================
 
 class StrategyEditor(QWidget):
@@ -1293,6 +1005,42 @@ class StrategyEditor(QWidget):
     backtest_requested = Signal()
     apply_strategy_requested = Signal(dict)
 
+    # ---------- SAVE CONFIG (must be defined before __init__) ----------
+    def _save(self):
+        self.cfg["symbol"] = self.symbol_box.text().upper()
+        self.cfg["interval"] = self.interval_box.text()
+        self.cfg["maType"] = self.ma_type_box.currentText()
+
+        self.cfg["longLen"] = int(float(self.longLen_box.text()))
+        self.cfg["shortLen"] = int(float(self.shortLen_box.text()))
+        self.cfg["signalLen"] = int(float(self.signalLen_box.text()))
+
+        # Convert TP % from "0.4" to 0.004
+        tp_val = float(self.tp_box.text())
+        if tp_val > 1:
+            tp_val = tp_val / 100
+        self.cfg["tp_percent"] = tp_val
+
+        # Convert SL % from "0.2" to 0.002
+        sl_val = float(self.sl_box.text())
+        if sl_val > 1:
+            sl_val = sl_val / 100
+        self.cfg["sl_percent"] = sl_val
+
+        self.cfg["maxTradeDays"] = int(float(self.days_box.text()))
+        self.cfg["maLength"] = int(float(self.maLen_box.text()))
+        self.cfg["trendSlopeLen"] = int(float(self.slopeLen_box.text()))
+        self.cfg["minSlope"] = float(self.minSlope_box.text())
+
+        # Execution settings
+        self.cfg["slippage_pct"] = float(self.slip_box.text())
+        self.cfg["fee_pct"] = float(self.fee_box.text())
+        self.cfg["partial_fill_steps"] = int(float(self.partial_steps_box.text()))
+        self.cfg["latency_ms"] = int(float(self.latency_box.text()))
+
+        ConfigManager.save(self.cfg)
+
+    # ---------- INIT UI ----------
     def __init__(self):
         super().__init__()
 
@@ -1334,6 +1082,7 @@ class StrategyEditor(QWidget):
         self.shortLen_box = num_input("TSI Short Length:", "shortLen")
         self.signalLen_box = num_input("TSI Signal Length:", "signalLen")
         self.tp_box = num_input("Take Profit (%):", "tp_percent")
+        self.sl_box = num_input("Stop Loss (%):", "sl_percent")    # <<< NEW FIELD
         self.days_box = num_input("Max Trade Days:", "maxTradeDays")
         self.maLen_box = num_input("Trend MA Length:", "maLength")
         self.slopeLen_box = num_input("Slope Lookback Bars:", "trendSlopeLen")
@@ -1370,50 +1119,22 @@ class StrategyEditor(QWidget):
         self.btn_backtest.clicked.connect(lambda: self.backtest_requested.emit())
         self.btn_apply.clicked.connect(self._emit_apply)
 
-    # -------------------------------------------------------------
-    # SAVE CONFIG BACK TO JSON
-    # -------------------------------------------------------------
-    def _save(self):
-        self.cfg["symbol"] = self.symbol_box.text().upper()
-        self.cfg["interval"] = self.interval_box.text()
-        self.cfg["maType"] = self.ma_type_box.currentText()
-
-        self.cfg["longLen"] = int(float(self.longLen_box.text()))
-        self.cfg["shortLen"] = int(float(self.shortLen_box.text()))
-        self.cfg["signalLen"] = int(float(self.signalLen_box.text()))
-
-        # Convert TP % from "0.4" to 0.004
-        tp_val = float(self.tp_box.text())
-        if tp_val > 1:
-            tp_val = tp_val / 100
-        self.cfg["tp_percent"] = tp_val
-
-        self.cfg["maxTradeDays"] = int(float(self.days_box.text()))
-        self.cfg["maLength"] = int(float(self.maLen_box.text()))
-        self.cfg["trendSlopeLen"] = int(float(self.slopeLen_box.text()))
-        self.cfg["minSlope"] = float(self.minSlope_box.text())
-
-        # Execution settings
-        self.cfg["slippage_pct"] = float(self.slip_box.text())
-        self.cfg["fee_pct"] = float(self.fee_box.text())
-        self.cfg["partial_fill_steps"] = int(float(self.partial_steps_box.text()))
-        self.cfg["latency_ms"] = int(float(self.latency_box.text()))
-
-        ConfigManager.save(self.cfg)
-
-    # -------------------------------------------------------------
-    # EXTRACT CURRENT STRATEGY PARAM SET
-    # -------------------------------------------------------------
+    # ---------- EXTRACT CURRENT STRATEGY PARAM SET ----------
     def get_params(self):
         return self.cfg.copy()
 
-    # -------------------------------------------------------------
-    # SIGNAL EMITTER
-    # -------------------------------------------------------------
+    # ---------- SIGNAL EMITTER ----------
     def _emit_apply(self):
         """Emits the strategy parameters to MainWindow."""
         self._save()
         self.apply_strategy_requested.emit(self.get_params())
+
+
+
+
+
+
+
 # ================================================================
 # SECTION 12 — SYMBOL SELECTOR PANEL (MARKET LIST + SEARCH)
 # ================================================================
@@ -1571,35 +1292,29 @@ def random_params():
         "longLen": random.randint(5, 60),
         "shortLen": random.randint(3, 40),
         "signalLen": random.randint(5, 30),
-
         "tp_percent": random.uniform(0.001, 0.02),   # 0.1% → 2%
+        "sl_percent": random.uniform(0.001, 0.01),   # 0.1% → 1%  # NEW!
         "maxTradeDays": random.randint(1, 10),
-
         "maType": random.choice(["EMA", "SMA", "WMA"]),
         "maLength": random.randint(10, 300),
-
         "trendSlopeLen": random.randint(2, 20),
         "minSlope": random.uniform(0.001, 0.1),
     }
 
 
-
-
-
-
-
-
-
-
 # ================================================================
-# SECTION 16 — LIVE PAPER TRADER (NEW)
+# SECTION 16 — LIVE PAPER TRADER (NEW, WITH STOP LOSS SUPPORT)
 # ================================================================
 
 class LivePaperTrader:
-    def __init__(self):
+    def __init__(self, params):
         self.position = None
         self.entry = None
         self.trades = []
+        self.params = params.copy()  # Always up-to-date param set
+
+    def update_params(self, params):
+        self.params = params.copy()
 
     def process_live_tick(self, df):
         if len(df) < 3:
@@ -1612,11 +1327,13 @@ class LivePaperTrader:
         long_signal = (row["TSI"] > row["TSI_SIGNAL"]) and \
                       (prev["TSI"] <= prev["TSI_SIGNAL"])
 
+        tp = self.params.get("tp_percent", 0.004)
+        sl = self.params.get("sl_percent", 0.002)
+
         if self.position is None and long_signal:
             # BUY
             self.position = "LONG"
             self.entry = row["close"]
-
             self.trades.append({
                 "type": "BUY",
                 "time": row.name,
@@ -1625,16 +1342,32 @@ class LivePaperTrader:
             print("[PAPER] BUY", self.entry)
 
         elif self.position == "LONG":
-            tp = self.entry * 1.004  # 0.4% TP
-            if row["close"] >= tp:
-                # SELL
+            tp_price = self.entry * (1 + tp)
+            sl_price = self.entry * (1 - sl)
+            if row["close"] >= tp_price:
                 self.position = None
                 self.trades.append({
                     "type": "SELL",
                     "time": row.name,
-                    "price": row["close"]
+                    "price": row["close"],
+                    "reason": "TP"
                 })
-                print("[PAPER] SELL", row["close"])
+                print("[PAPER] SELL (TP)", row["close"])
+            elif row["close"] <= sl_price:
+                self.position = None
+                self.trades.append({
+                    "type": "SELL",
+                    "time": row.name,
+                    "price": row["close"],
+                    "reason": "SL"
+                })
+                print("[PAPER] SELL (SL)", row["close"])
+
+
+
+
+
+
 
 
 
@@ -1646,7 +1379,6 @@ def optimizer_trial(args):
     params = random_params()
     trades, outdf, metrics = backtest_strategy(df.copy(), params)
     return params, trades, metrics
-
 
 
 # ================================================================
@@ -1765,12 +1497,18 @@ class MainWindow(QMainWindow):
             "shortLen": self.cfg["shortLen"],
             "signalLen": self.cfg["signalLen"],
             "tp_percent": self.cfg["tp_percent"],
+            "sl_percent": self.cfg["sl_percent"],      # NEW!
             "maxTradeDays": self.cfg["maxTradeDays"],
             "maType": self.cfg["maType"],
             "maLength": self.cfg["maLength"],
             "trendSlopeLen": self.cfg["trendSlopeLen"],
             "minSlope": self.cfg["minSlope"]
         }
+
+
+
+
+
 
     # ============================================================
     # LOAD SYMBOL
@@ -1934,6 +1672,11 @@ class MainWindow(QMainWindow):
                 "TSI": plot_df["TSI"].iloc[-1],
                 "TSI_SIGNAL": plot_df["TSI_SIGNAL"].iloc[-1]
             })
+
+
+
+
+
 
 
 # ================================================================
