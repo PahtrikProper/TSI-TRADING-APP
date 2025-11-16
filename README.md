@@ -194,8 +194,4 @@ See `LICENSE` file for details.
 * No API keys or account trading features are included by default.
 * Always backtest and validate strategies before using them live.
 
-```
 
-
-—Just tell me and I’ll generate it for you.
-```
