@@ -1203,13 +1203,8 @@ class SymbolSelector(QWidget):
         self.symbol_selected.emit(symbol)
 
 
-
-
-
-
-
 # ================================================================
-# SECTION 13 — BACKTEST RESULTS PANEL + PARAMETER GENERATOR
+# SECTION 13 — BACKTEST RESULTS PANEL + PARAMETER GENERATOR (WITH SL/TP REASON)
 # ================================================================
 
 import random
@@ -1221,7 +1216,8 @@ class BacktestResults(QWidget):
         ✔ Win Rate
         ✔ Max Drawdown
         ✔ Number of Trades
-        ✔ Trade List (table)
+        ✔ Trade List (table, with TP/SL reason)
+        ✔ Counts of TP vs SL exits
     """
 
     def __init__(self):
@@ -1235,15 +1231,24 @@ class BacktestResults(QWidget):
         self.winrate_label = QLabel("Win Rate: -")
         self.mdd_label = QLabel("Max Drawdown: -")
         self.trades_label = QLabel("Trades: -")
+        self.tp_label = QLabel("Take Profit Exits: -")
+        self.sl_label = QLabel("Stop Loss Exits: -")
 
-        for lbl in [self.pnl_label, self.winrate_label, self.mdd_label, self.trades_label]:
+        for lbl in [
+            self.pnl_label,
+            self.winrate_label,
+            self.mdd_label,
+            self.trades_label,
+            self.tp_label,
+            self.sl_label
+        ]:
             lbl.setStyleSheet("font-size: 14px; color: white;")
             layout.addWidget(lbl)
 
         # --- TRADE TABLE ---
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Type", "Time", "Price", "PNL %"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Type", "Time", "Price", "PNL %", "Exit Reason"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1263,27 +1268,58 @@ class BacktestResults(QWidget):
         self.mdd_label.setText(f"Max Drawdown: {mdd:.2f}%")
         self.trades_label.setText(f"Trades: {num}")
 
+        tp_count = sum(1 for t in trades if t.get("reason") == "TP")
+        sl_count = sum(1 for t in trades if t.get("reason") == "SL")
+        self.tp_label.setText(f"Take Profit Exits: {tp_count}")
+        self.sl_label.setText(f"Stop Loss Exits: {sl_count}")
+
+        # --- TABLE ROWS ---
+        # Each row: [Type, Time, Price, PNL %, Reason]
         rows = []
+        open_entry = None
+
         for t in trades:
-            if t["type"] == "BUY":
-                rows.append([t["type"], t["time"], t["price"], ""])
-            else:
+            t_type = t["type"]
+            t_time = str(t["time"])
+            t_price = t["price"]
+            t_reason = t.get("reason", "")
+
+            if t_type == "BUY":
+                open_entry = {
+                    "type": t_type,
+                    "time": t_time,
+                    "price": t_price,
+                    "pnl": "",
+                    "reason": ""
+                }
+                rows.append(open_entry)
+            elif t_type == "SELL":
+                # Pair with previous open BUY for PNL and reason
+                # Find last unmatched BUY
                 for r in reversed(rows):
-                    if r[0] == "BUY" and r[3] == "":
-                        entry = r[2]
-                        exit_ = t["price"]
+                    if r["type"] == "BUY" and r["pnl"] == "":
+                        entry = r["price"]
+                        exit_ = t_price
                         pnl_pct = ((exit_ - entry) / entry) * 100
-                        r[3] = f"{pnl_pct:.2f}%"
-                rows.append([t["type"], t["time"], t["price"], ""])
+                        r["pnl"] = f"{pnl_pct:.2f}%"
+                        r["reason"] = t_reason
+                        break
+                # Add SELL as its own row too, with exit reason for clarity
+                rows.append({
+                    "type": t_type,
+                    "time": t_time,
+                    "price": t_price,
+                    "pnl": "",
+                    "reason": t_reason
+                })
 
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            for j in range(4):
-                self.table.setItem(i, j, QTableWidgetItem(str(r[j])))
-
+            for j, key in enumerate(["type", "time", "price", "pnl", "reason"]):
+                self.table.setItem(i, j, QTableWidgetItem(str(r.get(key, ""))))
 
 # ================================================================
-# RANDOM PARAMETER GENERATOR
+# RANDOM PARAMETER GENERATOR (WITH SL SUPPORT)
 # ================================================================
 
 def random_params():
@@ -1293,13 +1329,24 @@ def random_params():
         "shortLen": random.randint(3, 40),
         "signalLen": random.randint(5, 30),
         "tp_percent": random.uniform(0.001, 0.02),   # 0.1% → 2%
-        "sl_percent": random.uniform(0.001, 0.01),   # 0.1% → 1%  # NEW!
+        "sl_percent": random.uniform(0.001, 0.01),   # 0.1% → 1%
         "maxTradeDays": random.randint(1, 10),
         "maType": random.choice(["EMA", "SMA", "WMA"]),
         "maLength": random.randint(10, 300),
         "trendSlopeLen": random.randint(2, 20),
         "minSlope": random.uniform(0.001, 0.1),
     }
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ================================================================
