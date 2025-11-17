@@ -6,7 +6,7 @@ import sys
 import json
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import requests
@@ -517,7 +517,6 @@ class ConfigManager:
 # ================================================================
 
 import pyqtgraph as pg
-from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 class CandlestickItem(pg.GraphicsObject):
     def __init__(self, data):
