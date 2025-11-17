@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QSplitter, QWIDGETSIZE_MAX
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread, QEvent, QSize
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QEvent, QSize
+from PySide6.QtGui import QDoubleValidator, QIntValidator
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -804,32 +804,68 @@ class StrategyEditor(QWidget):
     start_paper_requested = Signal(dict)
     stop_paper_requested = Signal()
 
+    def _format_float(self, value):
+        text = f"{value:.6f}".rstrip('0').rstrip('.')
+        return text or "0"
+
+    def _consume_float(self, box, fallback, minimum=None, maximum=None):
+        text = box.text().strip()
+        try:
+            value = float(text)
+        except ValueError:
+            value = fallback
+        if minimum is not None:
+            value = max(minimum, value)
+        if maximum is not None:
+            value = min(maximum, value)
+        box.setText(self._format_float(value))
+        return value
+
+    def _consume_int(self, box, fallback, minimum=1, maximum=None):
+        text = box.text().strip()
+        try:
+            value = float(text)
+        except ValueError:
+            value = fallback
+        value = int(round(value))
+        if minimum is not None:
+            value = max(minimum, value)
+        if maximum is not None:
+            value = min(maximum, value)
+        box.setText(str(value))
+        return value
+
     def _save(self):
+        current = self.cfg.copy()
         self.cfg["symbol"] = DEFAULT_SYMBOL
         self.cfg["interval"] = DEFAULT_INTERVAL
         self.cfg["maType"] = self.ma_type_box.currentText()
 
-        self.cfg["longLen"] = int(float(self.longLen_box.text()))
-        self.cfg["shortLen"] = int(float(self.shortLen_box.text()))
-        self.cfg["signalLen"] = int(float(self.signalLen_box.text()))
+        self.cfg["longLen"] = self._consume_int(self.longLen_box, current["longLen"], 1)
+        self.cfg["shortLen"] = self._consume_int(self.shortLen_box, current["shortLen"], 1)
+        self.cfg["signalLen"] = self._consume_int(self.signalLen_box, current["signalLen"], 1)
 
-        tp_val = float(self.tp_box.text())
-        if tp_val > 1: tp_val /= 100
+        tp_val = self._consume_float(self.tp_box, current["tp_percent"], minimum=0)
+        if tp_val > 1:
+            tp_val /= 100
         self.cfg["tp_percent"] = tp_val
+        self.tp_box.setText(self._format_float(tp_val))
 
-        sl_val = float(self.sl_box.text())
-        if sl_val > 1: sl_val /= 100
+        sl_val = self._consume_float(self.sl_box, current["sl_percent"], minimum=0)
+        if sl_val > 1:
+            sl_val /= 100
         self.cfg["sl_percent"] = sl_val
+        self.sl_box.setText(self._format_float(sl_val))
 
-        self.cfg["maxTradeDays"] = int(float(self.days_box.text()))
-        self.cfg["maLength"] = int(float(self.maLen_box.text()))
-        self.cfg["trendSlopeLen"] = int(float(self.slopeLen_box.text()))
-        self.cfg["minSlope"] = float(self.minSlope_box.text())
+        self.cfg["maxTradeDays"] = self._consume_int(self.days_box, current["maxTradeDays"], 1)
+        self.cfg["maLength"] = self._consume_int(self.maLen_box, current["maLength"], 1)
+        self.cfg["trendSlopeLen"] = self._consume_int(self.slopeLen_box, current["trendSlopeLen"], 1)
+        self.cfg["minSlope"] = self._consume_float(self.minSlope_box, current["minSlope"], minimum=0)
 
-        self.cfg["slippage_pct"] = float(self.slip_box.text())
-        self.cfg["fee_pct"] = float(self.fee_box.text())
-        self.cfg["partial_fill_steps"] = int(float(self.partial_steps_box.text()))
-        self.cfg["latency_ms"] = int(float(self.latency_box.text()))
+        self.cfg["slippage_pct"] = self._consume_float(self.slip_box, current["slippage_pct"], minimum=0)
+        self.cfg["fee_pct"] = self._consume_float(self.fee_box, current["fee_pct"], minimum=0)
+        self.cfg["partial_fill_steps"] = self._consume_int(self.partial_steps_box, current["partial_fill_steps"], 1)
+        self.cfg["latency_ms"] = self._consume_int(self.latency_box, current["latency_ms"], 0)
 
         ConfigManager.save(self.cfg)
 
@@ -863,42 +899,39 @@ class StrategyEditor(QWidget):
         layout.addWidget(self.ma_type_box)
         self.ma_type_box.currentIndexChanged.connect(self._save)
 
-        def num_input(label, key):
+        def make_double_validator(minimum=0.0, maximum=1000.0, decimals=6):
+            validator = QDoubleValidator(minimum, maximum, decimals, self)
+            validator.setNotation(QDoubleValidator.StandardNotation)
+            return validator
+
+        def make_int_validator(minimum=1, maximum=10000):
+            return QIntValidator(int(minimum), int(maximum), self)
+
+        def num_input(label, key, validator=None, as_float=False):
             layout.addWidget(QLabel(label))
-            box = QLineEdit(str(self.cfg[key]))
+            initial = self._format_float(self.cfg[key]) if as_float else str(self.cfg[key])
+            box = QLineEdit(initial)
+            box.setAlignment(Qt.AlignRight)
+            if validator:
+                box.setValidator(validator)
             layout.addWidget(box)
             box.editingFinished.connect(self._save)
             return box
 
-        self.longLen_box = num_input("TSI Long Length:", "longLen")
-        self.shortLen_box = num_input("TSI Short Length:", "shortLen")
-        self.signalLen_box = num_input("TSI Signal Length:", "signalLen")
-        self.tp_box = num_input("Take Profit %:", "tp_percent")
-        self.sl_box = num_input("Stop Loss %:", "sl_percent")
-        self.days_box = num_input("Max Trade Days:", "maxTradeDays")
-        self.maLen_box = num_input("Trend MA Length:", "maLength")
-        self.slopeLen_box = num_input("Slope Lookback:", "trendSlopeLen")
-        self.minSlope_box = num_input("Min Slope:", "minSlope")
+        self.longLen_box = num_input("TSI Long Length:", "longLen", make_int_validator(1, 500))
+        self.shortLen_box = num_input("TSI Short Length:", "shortLen", make_int_validator(1, 500))
+        self.signalLen_box = num_input("TSI Signal Length:", "signalLen", make_int_validator(1, 500))
+        self.tp_box = num_input("Take Profit %:", "tp_percent", make_double_validator(0.0, 100.0), as_float=True)
+        self.sl_box = num_input("Stop Loss %:", "sl_percent", make_double_validator(0.0, 100.0), as_float=True)
+        self.days_box = num_input("Max Trade Days:", "maxTradeDays", make_int_validator(1, 60))
+        self.maLen_box = num_input("Trend MA Length:", "maLength", make_int_validator(1, 500))
+        self.slopeLen_box = num_input("Slope Lookback:", "trendSlopeLen", make_int_validator(1, 200))
+        self.minSlope_box = num_input("Min Slope:", "minSlope", make_double_validator(0.0, 100.0), as_float=True)
 
-        layout.addWidget(QLabel("Slippage %:"))
-        self.slip_box = QLineEdit(str(self.cfg["slippage_pct"]))
-        layout.addWidget(self.slip_box)
-        self.slip_box.editingFinished.connect(self._save)
-
-        layout.addWidget(QLabel("Fee %:"))
-        self.fee_box = QLineEdit(str(self.cfg["fee_pct"]))
-        layout.addWidget(self.fee_box)
-        self.fee_box.editingFinished.connect(self._save)
-
-        layout.addWidget(QLabel("Partial Fill Steps:"))
-        self.partial_steps_box = QLineEdit(str(self.cfg["partial_fill_steps"]))
-        layout.addWidget(self.partial_steps_box)
-        self.partial_steps_box.editingFinished.connect(self._save)
-
-        layout.addWidget(QLabel("Latency (ms):"))
-        self.latency_box = QLineEdit(str(self.cfg["latency_ms"]))
-        layout.addWidget(self.latency_box)
-        self.latency_box.editingFinished.connect(self._save)
+        self.slip_box = num_input("Slippage %:", "slippage_pct", make_double_validator(0.0, 5.0), as_float=True)
+        self.fee_box = num_input("Fee %:", "fee_pct", make_double_validator(0.0, 5.0), as_float=True)
+        self.partial_steps_box = num_input("Partial Fill Steps:", "partial_fill_steps", make_int_validator(1, 20))
+        self.latency_box = num_input("Latency (ms):", "latency_ms", make_int_validator(0, 20000))
 
         self.btn_backtest = QPushButton("Run Backtest")
         self.btn_apply = QPushButton("Apply Strategy")
@@ -1263,10 +1296,13 @@ class MainWindow(QMainWindow):
     # ============================================================
     def apply_strategy(self, params=None):
         if params is not None:
-            self.cfg = params
+            self.cfg.update(params)
             ConfigManager.save(self.cfg)
 
-        trades, df = run_tsi_strategy(self.df, **self.extract_strategy_params())
+        if self.df is None or self.df.empty:
+            return
+
+        trades, df = run_tsi_strategy(self.df.copy(), **self.extract_strategy_params())
         self.df = df
 
         self.chart.clear_indicators()
@@ -1352,10 +1388,16 @@ class MainWindow(QMainWindow):
         self.header.set_status("Connecting to Binance stream…")
 
     def start_paper_trading(self, params):
+        if params:
+            self.cfg.update(params)
+            ConfigManager.save(self.cfg)
+
+        trading_params = self.extract_strategy_params()
+
         if self.paper_trader is None:
-            self.paper_trader = LivePaperTrader(params)
+            self.paper_trader = LivePaperTrader(trading_params)
         else:
-            self.paper_trader.update_params(params)
+            self.paper_trader.update_params(trading_params)
             self.paper_trader.reset()
             self.paper_trader.trades.clear()
 
@@ -1366,6 +1408,7 @@ class MainWindow(QMainWindow):
     def stop_paper_trading(self):
         if self.paper_trader:
             self.paper_trader.reset()
+            self.paper_trader.trades.clear()
         self.paper_trading_active = False
         self.strategy_panel.set_paper_buttons_state(False)
         self.chart.plot_trades([])
