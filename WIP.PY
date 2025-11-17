@@ -19,8 +19,10 @@ import random
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
-    QTableWidgetItem, QSplitter, QWIDGETSIZE_MAX
+    QTableWidgetItem, QSplitter
 )
+
+
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QEvent, QSize
 from PySide6.QtGui import QDoubleValidator, QIntValidator
 
@@ -1499,7 +1501,8 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange:
             if self.windowState() & Qt.WindowFullScreen:
-                self.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX)
+                self.setMaximumSize(Qt.QWIDGETSIZE_MAX, Qt.QWIDGETSIZE_MAX)
+
             else:
                 self.setMaximumSize(self._normal_max_size)
         super().changeEvent(event)
