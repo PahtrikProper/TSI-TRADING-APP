@@ -968,6 +968,12 @@ class BacktestResults(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.table)
 
+        self.status_label = QLabel("Status: Idle")
+        self.status_label.setStyleSheet(
+            "font-size: 13px; color: #A0A8C2; padding-top: 6px;"
+        )
+        layout.addWidget(self.status_label)
+
     def update_results(self, metrics, trades):
         self.pnl_label.setText(f"Total PnL: {metrics['total_pnl']:.2f}%")
         self.winrate_label.setText(f"Win Rate: {metrics['win_rate']:.2f}%")
@@ -1006,6 +1012,9 @@ class BacktestResults(QWidget):
         for i,r in enumerate(rows):
             for j,key in enumerate(["type","time","price","pnl","reason"]):
                 self.table.setItem(i,j,QTableWidgetItem(str(r.get(key,""))))
+
+    def set_status(self, text):
+        self.status_label.setText(text)
 
 # ================================================================
 # RANDOM PARAM GENERATOR (USED IN OPTIMIZER)
@@ -1097,7 +1106,7 @@ class OptimizerWorker(QObject):
     finished=Signal(dict,list,dict)
     progress=Signal(int)
 
-    def __init__(self, df, trials=10000):
+    def __init__(self, df, trials=2000):
         super().__init__()
         self.df=df
         self.trials=trials
@@ -1128,8 +1137,7 @@ class OptimizerWorker(QObject):
                 if best_metrics is None or m["total_pnl"]>best_metrics["total_pnl"]:
                     best_params=p; best_metrics=m; best_trades=tr
 
-                if i%200==0:
-                    self.progress.emit(i)
+                self.progress.emit(i)
 
         self.finished.emit(best_params,best_trades,best_metrics)
 
@@ -1205,6 +1213,7 @@ class MainWindow(QMainWindow):
         self.df=None
         self.paper_trader=None
         self.paper_trading_active=False
+        self.optimizer_trials = 2000
 
         self.load_symbol(DEFAULT_SYMBOL, DEFAULT_INTERVAL)
     # ============================================================
@@ -1273,10 +1282,15 @@ class MainWindow(QMainWindow):
     # RUN OPTIMIZER
     # ============================================================
     def run_backtest(self):
+        if self.df is None or self.df.empty:
+            self.results_panel.set_status("Status: No data to backtest")
+            return
+
         print("[OPT] Starting optimizer...")
+        self.results_panel.set_status("Status: Running backtest…")
 
         self.opt_thread = QThread()
-        self.opt_worker = OptimizerWorker(self.df.copy(), trials=10000)
+        self.opt_worker = OptimizerWorker(self.df.copy(), trials=self.optimizer_trials)
         self.opt_worker.moveToThread(self.opt_thread)
 
         self.opt_thread.started.connect(self.opt_worker.run)
@@ -1293,13 +1307,22 @@ class MainWindow(QMainWindow):
     # OPTIMIZER PROGRESS
     # ============================================================
     def optimizer_progress(self, n):
-        print(f"[OPT] Completed {n}/10000")
+        total = getattr(self.opt_worker, "trials", self.optimizer_trials)
+        self.results_panel.set_status(
+            f"Status: Running backtest… {min(n, total)}/{total}"
+        )
+        print(f"[OPT] Completed {n}/{total}")
 
     # ============================================================
     # OPTIMIZER COMPLETE
     # ============================================================
     def optimizer_finished(self, params, trades, metrics):
         print("[OPT] COMPLETE")
+
+        if not params or not metrics:
+            self.results_panel.set_status("Status: Backtest failed")
+            return
+
         print("Best Params:", params)
         print(f"Best PnL: {metrics['total_pnl']:.2f}%")
 
@@ -1309,8 +1332,10 @@ class MainWindow(QMainWindow):
         print("[OPT] Applying optimized parameters...")
         self.apply_strategy(self.cfg)
 
+        trades = trades or []
         self.results_panel.update_results(metrics, trades)
         self.chart.plot_trades(trades)
+        self.results_panel.set_status("Status: Backtest complete")
 
         print("[OPT] Optimized parameters ACTIVE")
 
