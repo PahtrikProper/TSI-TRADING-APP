@@ -19,15 +19,10 @@ import random
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
-    QTableWidgetItem, QSplitter
+    QTableWidgetItem, QSplitter, QWIDGETSIZE_MAX
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QEvent, QSize
 from PySide6.QtGui import QDoubleValidator, QIntValidator
-
-try:
-    from PySide6.QtWidgets import QWIDGETSIZE_MAX
-except ImportError:
-    QWIDGETSIZE_MAX = (1 << 24) - 1
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
