@@ -19,7 +19,7 @@ import random
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
-    QTableWidgetItem, QSplitter, QFrame, QDockWidget
+    QTableWidgetItem, QSplitter, QFrame, QDockWidget, QScrollArea
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QEvent, QSize
 from PySide6.QtGui import QDoubleValidator, QIntValidator
@@ -498,6 +498,8 @@ class ConfigManager:
         "fee_pct":0.0004,
         "partial_fill_steps":3,
         "latency_ms":150,
+        "api_key":"",
+        "api_secret":"",
     }
 
     @staticmethod
@@ -834,11 +836,24 @@ class StrategyEditor(QWidget):
         self.ma_type_box.setProperty("locked", "true")
         layout.addWidget(self.ma_type_box)
 
+        params_scroll = QScrollArea()
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        params_scroll.setFrameShape(QFrame.NoFrame)
+        params_scroll.setMinimumHeight(260)
+
+        params_widget = QWidget()
+        params_layout = QVBoxLayout(params_widget)
+        params_layout.setAlignment(Qt.AlignTop)
+        params_layout.setSpacing(6)
+        params_scroll.setWidget(params_widget)
+        layout.addWidget(params_scroll)
+
         def add_display(label, key, as_float=False):
-            layout.addWidget(QLabel(label))
+            params_layout.addWidget(QLabel(label))
             box = self._locked_line("0")
             box.setAlignment(Qt.AlignRight)
-            layout.addWidget(box)
+            params_layout.addWidget(box)
             self.field_map[key] = (box, as_float)
 
         self.field_map = {}
@@ -903,6 +918,7 @@ class RemoteControlPanel(QWidget):
     manual_buy = Signal()
     manual_sell = Signal()
     apply_params = Signal()
+    apply_api_credentials = Signal(str, str)
     exit_requested = Signal()
 
     def __init__(self):
@@ -940,6 +956,8 @@ class RemoteControlPanel(QWidget):
             ],
         )
 
+        self._build_api_section(layout)
+
         self._build_section(
             layout,
             "Manual Controls",
@@ -971,6 +989,54 @@ class RemoteControlPanel(QWidget):
             self.buttons[key] = btn
 
         parent_layout.addWidget(frame)
+
+    def _build_api_section(self, parent_layout):
+        frame = QFrame()
+        frame.setFrameShape(QFrame.StyledPanel)
+        frame.setObjectName("RemoteSection")
+        layout = QVBoxLayout(frame)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("API Credentials"))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(150)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setAlignment(Qt.AlignTop)
+        inner_layout.setSpacing(6)
+
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("API Key")
+        inner_layout.addWidget(QLabel("API Key"))
+        inner_layout.addWidget(self.api_key_input)
+
+        self.api_secret_input = QLineEdit()
+        self.api_secret_input.setPlaceholderText("API Secret")
+        self.api_secret_input.setEchoMode(QLineEdit.Password)
+        inner_layout.addWidget(QLabel("API Secret"))
+        inner_layout.addWidget(self.api_secret_input)
+
+        scroll.setWidget(inner)
+        layout.addWidget(scroll)
+
+        apply_btn = QPushButton("Apply API Credentials")
+        apply_btn.clicked.connect(self._emit_api_credentials)
+        layout.addWidget(apply_btn)
+
+        parent_layout.addWidget(frame)
+
+    def _emit_api_credentials(self):
+        key = self.api_key_input.text().strip()
+        secret = self.api_secret_input.text().strip()
+        self.apply_api_credentials.emit(key, secret)
+
+    def set_api_credentials(self, key, secret):
+        self.api_key_input.setText(key or "")
+        self.api_secret_input.setText(secret or "")
 
     def set_states(self, paper_active=False, live_active=False):
         self.buttons["start_paper"].setEnabled(not paper_active)
@@ -1267,6 +1333,7 @@ class MainWindow(QMainWindow):
         self.remote_panel.manual_buy.connect(self.manual_buy)
         self.remote_panel.manual_sell.connect(self.manual_sell)
         self.remote_panel.apply_params.connect(lambda: self.apply_strategy(self.cfg))
+        self.remote_panel.apply_api_credentials.connect(self.on_apply_api_credentials)
         self.remote_panel.exit_requested.connect(self.close)
 
         self.stream=None
@@ -1277,6 +1344,10 @@ class MainWindow(QMainWindow):
         self.optimizer_trials = 2000
 
         self.remote_panel.set_states(False, False)
+        self.remote_panel.set_api_credentials(
+            self.cfg.get("api_key", ""),
+            self.cfg.get("api_secret", "")
+        )
 
         self.load_symbol(DEFAULT_SYMBOL, DEFAULT_INTERVAL)
     # ============================================================
@@ -1344,6 +1415,13 @@ class MainWindow(QMainWindow):
 
         if self.paper_trader:
             self.paper_trader.update_params(self.extract_strategy_params())
+
+    def on_apply_api_credentials(self, key, secret):
+        self.cfg["api_key"] = key
+        self.cfg["api_secret"] = secret
+        ConfigManager.save(self.cfg)
+        self.remote_panel.set_api_credentials(key, secret)
+        self.header.set_status("API credentials updated")
 
     # ============================================================
     # RUN OPTIMIZER
