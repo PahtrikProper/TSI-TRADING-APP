@@ -1,74 +1,45 @@
 # TSI Trading App
 
-TSI Trading App is a desktop trading application built with Python and PySide6.  
-It provides TradingView-style charting, real-time Binance market data, TSI indicator analysis, historical backtesting, and a multiprocessing strategy optimizer.
+TSI Trading App is a desktop trading terminal built with Python + PySide6.
+It delivers TradingView-style charting, a SOL-only True Strength Index (TSI)
+strategy, historical backtesting, multiprocessing optimization, and both paper
+and manual live controls through a dedicated remote panel.
 
 <img width="1920" height="1080" alt="Screen Shot 2025-11-16 at 7 34 55 pm" src="https://github.com/user-attachments/assets/40da1083-e0bf-4c4f-8831-66f5052f245c" />
-
-
-
-The project is designed as a self-contained quantitative research and visualization terminal focused on the True Strength Index (TSI) trend-following system.
 
 ---
 
 ## Features
 
 ### Real-Time Market Data
-- Live WebSocket Kline streaming from Binance
-- Automatic reconnection
-- Accurate candle append/replace handling
-- Clean, corruption-free OHLC dataframe management
+- Locked SOL/USDT WebSocket kline streaming from Binance
+- Automatic reconnection & candle replacement
+- Clean OHLC dataframe maintenance
 
 ### TradingView-Style Charting
-- High-performance candlestick renderer (pyqtgraph)
-- Indicator overlays (Trend MA)
-- Buy/Sell markers
-- Dedicated TSI subpanel
-- Auto-scaling and auto-scrolling
+- High-performance candlesticks (pyqtgraph)
+- Trend MA overlay + TSI indicator subpanel
+- Buy/Sell markers for backtests and paper/manual trades
+- Auto-scaling chart stack with splitter layout
+
+### Remote Control Panel
+- Start/stop paper trading & live trading hooks
+- Launch optimizer, manual BUY/SELL buttons, apply parameters, exit
+- Buttons stay in sync with the strategy state
 
 ### TSI Strategy Engine
-- TradingView-compatible TSI calculations
-- Trend filter using EMA/SMA/WMA
-- Slope filter and min-slope requirement
-- Max trades-per-day control
-- Take-profit system
+- TradingView-compatible TSI + signal calculations
+- EMA/SMA/WMA trend filter and slope checks
+- Configurable TP/SL, trade-per-day guard, and stop-loss enforcement
 
-### Backtesting Framework
-- Automatic TSI + trend filter evaluation over historical data
-- PnL, Win Rate, Max Drawdown metrics
-- Detailed trade list with per-trade PnL
-- Equity curve calculation
-
-### Multiprocessing Optimizer
-- Randomized parameter sweeps
-- Uses multiple CPU cores
-- Automatically selects best parameter set
-- Automatically applies best set to the live chart
-- Saves best parameters as new persistent defaults
+### Backtesting & Optimizer
+- Historical evaluation with PnL, Win Rate, Max Drawdown, trade table
+- Multiprocessing randomized optimizer (2,000 trials by default)
+- Best parameters persisted to `strategy_config.json`
 
 ### Paper Trading Engine
-- Executes TSI strategy on live WebSocket data
-- BUY on signal cross
-- SELL on take-profit
-- Logs trades in memory
-
-### Paper Trading Order Execution Simulator
-- Slippage
-- Bid/ask spread modeling
-- Maker/taker fees
-- Partial fills
-- Latency simulation
-
-### JSON Configuration System
-- Persistent settings stored in `strategy_config.json`
-- Strategy parameters and execution parameters saved automatically
-- Optimizer writes new defaults on completion
-
-### Symbol Selector
-- Full Binance USDT symbol list
-- Searchable filter
-- Click-to-load
-- Automatic WebSocket restart on symbol change
+- Executes strategy on live candles with TP/SL exits
+- Tracks trades and plots them on the chart
 
 ---
 
@@ -76,7 +47,6 @@ The project is designed as a self-contained quantitative research and visualizat
 
 ### Requirements
 ```
-
 Python 3.9+
 PySide6
 pyqtgraph
@@ -84,51 +54,41 @@ pandas
 numpy
 requests
 websocket-client
-
-````
+```
 
 ### Install dependencies
 ```bash
 pip install PySide6 pyqtgraph pandas numpy requests websocket-client
-````
+```
 
 ### Run the application
 
 ```bash
-python tsi_trading_app.py
+python main.py
 ```
+
+The repo also includes `TSI TRADING APP.py`, `SOL_ONLY_TRADER_FULL.py`, and
+`WIP.PY` which mirror the same build for archival/testing purposes.
 
 ---
 
 ## Configuration
 
-Settings are stored in:
-
-```
-strategy_config.json
-```
-
-This file is created automatically on first run.
-It contains:
-
-* Symbol
-* Time interval
-* TSI parameters
-* Trend filter parameters
-* Execution simulator settings
-* Optimizer defaults
-
-The optimizer writes new defaults when it completes.
+Settings are stored in `strategy_config.json` (auto-created on first run) and
+contain the locked SOL/USDT interval plus TSI/trend/execution parameters.
+The optimizer overwrites this file with the best-performing set when it finishes.
 
 ---
 
 ## Project Structure
-
 ```
-TSI-Trading-App/
+TSI-TRADING-APP/
 │
-├── tsi_trading_app.py            # Main application file
-├── strategy_config.json          # Auto-generated configuration
+├── main.py                   # Primary application entry point
+├── TSI TRADING APP.py        # Full build copy (legacy naming)
+├── SOL_ONLY_TRADER_FULL.py   # Distribution copy
+├── WIP.PY                    # Working copy used during development
+├── strategy_config.json      # Generated on first run (not committed)
 └── README.md
 ```
 
@@ -137,61 +97,40 @@ TSI-Trading-App/
 ## Architecture Overview
 
 ### Data Flow
-
-1. Fetch historical candles from Binance REST
-2. Compute indicators
-3. Plot chart and TSI panel
-4. Start WebSocket kline stream
-5. Update dataframe and indicators on each live candle
-6. Trigger:
-
-   * paper trading
-   * live indicator updates
-   * chart updates
+1. Fetch historical SOL/USDT candles
+2. Compute indicators & plot chart/TSI panels
+3. Start Binance WebSocket
+4. Update dataframe + indicators per candle
+5. Drive paper trading, manual markers, and optimizer updates
 
 ### Strategy Flow
-
-* Compute TSI + signal
-* Compute trend filter MA + slope
-* Identify crossovers
-* Apply daily trade limiter
-* Trigger BUY and SELL events
+- Compute TSI + signal crossover
+- Apply trend MA + slope filters
+- Enforce daily trade limit and TP/SL exits
+- Emit BUY/SELL events for backtests and live/paper trading
 
 ### Optimizer Flow
-
-* Randomize parameter sets
-* Run multiple strategy backtests
-* Track best PnL
-* Emit result to main GUI
-* Save & apply best settings
+- Randomize parameter sets
+- Run multiprocessing backtests
+- Track highest PnL and emit status updates
+- Save/apply best parameters to chart and config
 
 ---
 
 ## Roadmap
-
-Planned enhancements:
-
-* Live Paper Trading (Binance API integration)
-* Strategy alerts
-* Additional indicators (ATR, RSI, MACD, Supertrend)
-* CSV/Excel export for backtests
-* Replay mode for historical candles
-* Theme customization
-* Multi-symbol dashboards
+- Native live trading integration (REST/WebSocket order placement)
+- Additional indicators (ATR, RSI, MACD, Supertrend)
+- Trade/export tooling and playback
+- Theming & multi-symbol dashboards (post SOL-only phase)
 
 ---
 
 ## License
-
-MIT License.
-See `LICENSE` file for details.
+MIT License. See `LICENSE`.
 
 ---
 
 ## Notes
-
-* This project is intended for research and educational purposes.
-* No API keys or account trading features are included by default.
-* Always backtest and validate strategies before using them live.
-
-
+- Research/education use only
+- No API keys or account trading included
+- Always validate strategies before live deployment

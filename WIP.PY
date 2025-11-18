@@ -6,7 +6,7 @@ import sys
 import json
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import requests
@@ -14,14 +14,20 @@ import websocket
 import urllib3
 import os
 import concurrent.futures
+import random
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
-    QTableWidgetItem, QFileDialog, QSplitter
+    QTableWidgetItem, QSplitter, QFrame, QDockWidget
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QEvent, QSize
+from PySide6.QtGui import QDoubleValidator, QIntValidator
+
+try:
+    from PySide6.QtWidgets import QWIDGETSIZE_MAX
+except ImportError:
+    QWIDGETSIZE_MAX = (1 << 24) - 1
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -49,6 +55,89 @@ INTERVAL_MS = {
     "1w": 604800000,
 }
 
+TRADINGVIEW_QSS = """
+QWidget {
+    background-color: #030712;
+    color: #D7DEEE;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+    font-size: 13px;
+}
+QLabel {
+    color: #8F9BB3;
+}
+QLabel#HeaderSymbol {
+    color: #F4F7FF;
+    font-size: 24px;
+    font-weight: 700;
+}
+QLabel#HeaderInterval {
+    font-size: 16px;
+    font-weight: 600;
+    color: #7DC1FF;
+}
+QLabel#HeaderPrice {
+    font-size: 28px;
+    font-weight: 700;
+    color: #FFFFFF;
+}
+QLabel#HeaderChange {
+    font-size: 16px;
+}
+QLabel#HeaderStatus {
+    color: #7E8DA8;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+}
+QLineEdit, QComboBox, QTableWidget, QTableView {
+    background-color: #0A1422;
+    border: 1px solid #172235;
+    border-radius: 4px;
+    padding: 4px 6px;
+    color: #E3E9F5;
+}
+QLineEdit[locked="true"] {
+    color: #6D768C;
+}
+QPushButton {
+    background-color: #1A2537;
+    border: 1px solid #24324B;
+    border-radius: 4px;
+    padding: 8px 10px;
+    color: #EFF2FF;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background-color: #273656;
+}
+QPushButton:pressed {
+    background-color: #1C283D;
+}
+QPushButton:disabled {
+    background-color: #111827;
+    color: #576074;
+    border-color: #1d2535;
+}
+QTableWidget {
+    gridline-color: #172235;
+}
+QHeaderView::section {
+    background-color: #0F1928;
+    color: #A8B3C9;
+    border: none;
+    padding: 4px 6px;
+}
+QSplitter::handle {
+    background-color: #101726;
+    margin: 2px;
+}
+QFrame#RemoteSection {
+    background-color: #0A1422;
+    border: 1px solid #1C2638;
+    border-radius: 8px;
+    padding: 8px;
+}
+"""
+
 # ================================================================
 # SECTION 2 — BINANCE REST FETCH
 # ================================================================
@@ -61,18 +150,6 @@ def safe_get_json(url, params=None):
     except Exception as e:
         print("REST API error:", e)
         return None
-
-def fetch_all_symbols():
-    url = BINANCE_REST + "/api/v3/exchangeInfo"
-    data = safe_get_json(url)
-    if data is None:
-        return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-
-    out = []
-    for s in data.get("symbols", []):
-        if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT":
-            out.append(s["symbol"])
-    return sorted(out)
 
 def fetch_historical_klines(symbol=DEFAULT_SYMBOL, interval=DEFAULT_INTERVAL):
     print(f"[REST] Fetching {symbol} {interval} (1500 limit)")
@@ -271,12 +348,24 @@ def run_tsi_strategy(
             tp = entry * (1 + tp_percent)
             sl = entry * (1 - sl_percent)
 
-            if row["close"] >= tp:
+            exit_reason = None
+            exit_price = None
+
+            if row["low"] <= sl:
+                exit_reason = "SL"
+                exit_price = sl
+            elif row["high"] >= tp:
+                exit_reason = "TP"
+                exit_price = tp
+
+            if exit_reason:
                 in_pos = False
-                trades.append({"type":"SELL","time":row.name,"price":row["close"],"reason":"TP"})
-            elif row["close"] <= sl:
-                in_pos = False
-                trades.append({"type":"SELL","time":row.name,"price":row["close"],"reason":"SL"})
+                trades.append({
+                    "type": "SELL",
+                    "time": row.name,
+                    "price": exit_price,
+                    "reason": exit_reason
+                })
 
     return trades, df
 
@@ -422,6 +511,8 @@ class ConfigManager:
         for k,v in ConfigManager.DEFAULTS.items():
             if k not in cfg:
                 cfg[k]=v
+        cfg["symbol"] = DEFAULT_SYMBOL
+        cfg["interval"] = DEFAULT_INTERVAL
         ConfigManager.save(cfg)
         return cfg
 
@@ -438,7 +529,6 @@ class ConfigManager:
 # ================================================================
 
 import pyqtgraph as pg
-from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 class CandlestickItem(pg.GraphicsObject):
     def __init__(self, data):
@@ -471,8 +561,12 @@ class ChartWidget(QWidget):
         layout.setContentsMargins(0,0,0,0)
 
         self.plot=pg.PlotWidget()
-        self.plot.setBackground('#111')
-        self.plot.showGrid(x=True,y=True)
+        self.plot.setBackground('#050A12')
+        self.plot.showGrid(x=True,y=True,alpha=0.15)
+        self.plot.getAxis('left').setPen(pg.mkPen('#394252'))
+        self.plot.getAxis('bottom').setPen(pg.mkPen('#394252'))
+        self.plot.getAxis('left').setTextPen(pg.mkPen('#A7B4C6'))
+        self.plot.getAxis('bottom').setTextPen(pg.mkPen('#A7B4C6'))
         layout.addWidget(self.plot)
 
         self.df=None
@@ -494,6 +588,7 @@ class ChartWidget(QWidget):
             self.plot.removeItem(self.candle_item)
         self.candle_item=CandlestickItem(arr)
         self.plot.addItem(self.candle_item)
+        self._clear_trade_markers()
         self.plot.enableAutoRange(axis='x',enable=True)
         self.plot.enableAutoRange(axis='y',enable=True)
 
@@ -532,6 +627,55 @@ class ChartWidget(QWidget):
             self.plot.enableAutoRange(axis='x',enable=True)
             self.plot.enableAutoRange(axis='y',enable=True)
 
+    def _clear_trade_markers(self):
+        for marker in self.trade_markers:
+            try:
+                self.plot.removeItem(marker)
+            except Exception:
+                pass
+        self.trade_markers=[]
+
+    def plot_trades(self, trades):
+        self._clear_trade_markers()
+
+        if self.df is None or not trades:
+            return
+
+        index_lookup={ts:idx for idx,ts in enumerate(self.df.index)}
+
+        for trade in trades:
+            timestamp=trade.get("time")
+            if timestamp is None:
+                continue
+
+            if isinstance(timestamp,str):
+                timestamp=pd.to_datetime(timestamp)
+            elif not isinstance(timestamp,pd.Timestamp):
+                timestamp=pd.Timestamp(timestamp)
+
+            timestamp=timestamp.replace(second=0,microsecond=0)
+            idx=index_lookup.get(timestamp)
+            if idx is None:
+                continue
+
+            price=float(trade.get("price", float('nan')))
+            if np.isnan(price):
+                continue
+
+            is_buy=trade.get("type")=="BUY"
+            symbol="t1" if is_buy else "t"
+            color="#00E676" if is_buy else "#FF5252"
+
+            marker=self.plot.plot(
+                [idx],[price],
+                pen=None,
+                symbol=symbol,
+                symbolBrush=color,
+                symbolPen=pg.mkPen(color),
+                symbolSize=12
+            )
+            self.trade_markers.append(marker)
+
     def plot_indicator(self, series, color="#ffaa00", width=2):
         if series is None or len(series)==0: return
         x=np.arange(len(series))
@@ -545,7 +689,55 @@ class ChartWidget(QWidget):
             except: pass
         self.indicator_items=[]
 # ================================================================
-# SECTION 10 — TSI INDICATOR PANEL
+# SECTION 10 — INSTRUMENT HEADER (TRADINGVIEW LOOK)
+# ================================================================
+
+class InstrumentHeader(QWidget):
+    def __init__(self, symbol=DEFAULT_SYMBOL, interval=DEFAULT_INTERVAL):
+        super().__init__()
+        self.setObjectName("InstrumentHeader")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(24, 16, 24, 12)
+        layout.setSpacing(18)
+
+        self.symbol_label = QLabel(symbol)
+        self.symbol_label.setObjectName("HeaderSymbol")
+
+        self.interval_label = QLabel(interval.upper())
+        self.interval_label.setObjectName("HeaderInterval")
+
+        self.price_label = QLabel("-")
+        self.price_label.setObjectName("HeaderPrice")
+
+        self.change_label = QLabel("0.00%")
+        self.change_label.setObjectName("HeaderChange")
+
+        self.status_label = QLabel("Waiting for data…")
+        self.status_label.setObjectName("HeaderStatus")
+
+        layout.addWidget(self.symbol_label)
+        layout.addWidget(self.interval_label)
+        layout.addWidget(self.price_label)
+        layout.addWidget(self.change_label)
+        layout.addStretch(1)
+        layout.addWidget(self.status_label)
+
+    def update_quote(self, price=None, change_pct=None, interval=None):
+        if price is not None:
+            self.price_label.setText(f"{price:,.3f}")
+        if change_pct is not None:
+            sign_color = "#26a69a" if change_pct >= 0 else "#ef5350"
+            self.change_label.setStyleSheet(f"color: {sign_color}; font-weight: 600;")
+            self.change_label.setText(f"{change_pct:+.2f}%")
+        if interval:
+            self.interval_label.setText(interval.upper())
+
+    def set_status(self, text):
+        self.status_label.setText(text)
+
+# ================================================================
+# SECTION 11 — TSI INDICATOR PANEL
 # ================================================================
 
 class IndicatorPanel(QWidget):
@@ -555,8 +747,12 @@ class IndicatorPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.plot = pg.PlotWidget()
-        self.plot.setBackground('#111')
-        self.plot.showGrid(x=True, y=True)
+        self.plot.setBackground('#050A12')
+        self.plot.showGrid(x=True, y=True, alpha=0.15)
+        self.plot.getAxis('left').setPen(pg.mkPen('#394252'))
+        self.plot.getAxis('bottom').setPen(pg.mkPen('#394252'))
+        self.plot.getAxis('left').setTextPen(pg.mkPen('#A7B4C6'))
+        self.plot.getAxis('bottom').setTextPen(pg.mkPen('#A7B4C6'))
         layout.addWidget(self.plot)
 
         self.tsi_item = None
@@ -614,156 +810,180 @@ class IndicatorPanel(QWidget):
 # ================================================================
 
 class StrategyEditor(QWidget):
-    backtest_requested = Signal()
-    apply_strategy_requested = Signal(dict)
-
-    def _save(self):
-        self.cfg["symbol"] = self.symbol_box.text().upper()
-        self.cfg["interval"] = self.interval_box.text()
-        self.cfg["maType"] = self.ma_type_box.currentText()
-
-        self.cfg["longLen"] = int(float(self.longLen_box.text()))
-        self.cfg["shortLen"] = int(float(self.shortLen_box.text()))
-        self.cfg["signalLen"] = int(float(self.signalLen_box.text()))
-
-        tp_val = float(self.tp_box.text())
-        if tp_val > 1: tp_val /= 100
-        self.cfg["tp_percent"] = tp_val
-
-        sl_val = float(self.sl_box.text())
-        if sl_val > 1: sl_val /= 100
-        self.cfg["sl_percent"] = sl_val
-
-        self.cfg["maxTradeDays"] = int(float(self.days_box.text()))
-        self.cfg["maLength"] = int(float(self.maLen_box.text()))
-        self.cfg["trendSlopeLen"] = int(float(self.slopeLen_box.text()))
-        self.cfg["minSlope"] = float(self.minSlope_box.text())
-
-        self.cfg["slippage_pct"] = float(self.slip_box.text())
-        self.cfg["fee_pct"] = float(self.fee_box.text())
-        self.cfg["partial_fill_steps"] = int(float(self.partial_steps_box.text()))
-        self.cfg["latency_ms"] = int(float(self.latency_box.text()))
-
-        ConfigManager.save(self.cfg)
-
     def __init__(self):
         super().__init__()
         self.cfg = ConfigManager.load()
+        self.setMinimumWidth(320)
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(8)
 
         layout.addWidget(QLabel("Symbol:"))
-        self.symbol_box = QLineEdit(self.cfg["symbol"])
+        self.symbol_box = self._locked_line(DEFAULT_SYMBOL)
         layout.addWidget(self.symbol_box)
-        self.symbol_box.editingFinished.connect(self._save)
 
         layout.addWidget(QLabel("Interval:"))
-        self.interval_box = QLineEdit(self.cfg["interval"])
+        self.interval_box = self._locked_line(DEFAULT_INTERVAL)
         layout.addWidget(self.interval_box)
-        self.interval_box.editingFinished.connect(self._save)
 
         layout.addWidget(QLabel("MA Type:"))
         self.ma_type_box = QComboBox()
-        self.ma_type_box.addItems(["EMA", "SMA", "WMA"])
-        self.ma_type_box.setCurrentText(self.cfg["maType"])
+        self.ma_type_box.addItems([EMA, SMA, WMA])
+        self.ma_type_box.setEnabled(False)
+        self.ma_type_box.setProperty("locked", "true")
         layout.addWidget(self.ma_type_box)
-        self.ma_type_box.currentIndexChanged.connect(self._save)
 
-        def num_input(label, key):
+        def add_display(label, key, as_float=False):
             layout.addWidget(QLabel(label))
-            box = QLineEdit(str(self.cfg[key]))
+            box = self._locked_line("0")
+            box.setAlignment(Qt.AlignRight)
             layout.addWidget(box)
-            box.editingFinished.connect(self._save)
-            return box
+            self.field_map[key] = (box, as_float)
 
-        self.longLen_box = num_input("TSI Long Length:", "longLen")
-        self.shortLen_box = num_input("TSI Short Length:", "shortLen")
-        self.signalLen_box = num_input("TSI Signal Length:", "signalLen")
-        self.tp_box = num_input("Take Profit %:", "tp_percent")
-        self.sl_box = num_input("Stop Loss %:", "sl_percent")
-        self.days_box = num_input("Max Trade Days:", "maxTradeDays")
-        self.maLen_box = num_input("Trend MA Length:", "maLength")
-        self.slopeLen_box = num_input("Slope Lookback:", "trendSlopeLen")
-        self.minSlope_box = num_input("Min Slope:", "minSlope")
+        self.field_map = {}
 
-        layout.addWidget(QLabel("Slippage %:"))
-        self.slip_box = QLineEdit(str(self.cfg["slippage_pct"]))
-        layout.addWidget(self.slip_box)
-        self.slip_box.editingFinished.connect(self._save)
+        add_display("TSI Long Length:", "longLen")
+        add_display("TSI Short Length:", "shortLen")
+        add_display("TSI Signal Length:", "signalLen")
+        add_display("Take Profit %:", "tp_percent", True)
+        add_display("Stop Loss %:", "sl_percent", True)
+        add_display("Max Trade Days:", "maxTradeDays")
+        add_display("Trend MA Length:", "maLength")
+        add_display("Slope Lookback:", "trendSlopeLen")
+        add_display("Min Slope:", "minSlope", True)
 
-        layout.addWidget(QLabel("Fee %:"))
-        self.fee_box = QLineEdit(str(self.cfg["fee_pct"]))
-        layout.addWidget(self.fee_box)
-        self.fee_box.editingFinished.connect(self._save)
+        add_display("Slippage %:", "slippage_pct", True)
+        add_display("Fee %:", "fee_pct", True)
+        add_display("Partial Fill Steps:", "partial_fill_steps")
+        add_display("Latency (ms):", "latency_ms")
 
-        layout.addWidget(QLabel("Partial Fill Steps:"))
-        self.partial_steps_box = QLineEdit(str(self.cfg["partial_fill_steps"]))
-        layout.addWidget(self.partial_steps_box)
-        self.partial_steps_box.editingFinished.connect(self._save)
+        self.refresh_from_config(self.cfg)
 
-        layout.addWidget(QLabel("Latency (ms):"))
-        self.latency_box = QLineEdit(str(self.cfg["latency_ms"]))
-        layout.addWidget(self.latency_box)
-        self.latency_box.editingFinished.connect(self._save)
+    def _locked_line(self, text):
+        box = QLineEdit(text)
+        box.setReadOnly(True)
+        box.setFocusPolicy(Qt.NoFocus)
+        box.setProperty("locked", "true")
+        return box
 
-        self.btn_backtest = QPushButton("Run Backtest")
-        self.btn_apply = QPushButton("Apply Strategy")
-        layout.addWidget(self.btn_backtest)
-        layout.addWidget(self.btn_apply)
+    def _format_float(self, value):
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+        return text or "0"
 
-        self.btn_backtest.clicked.connect(lambda: self.backtest_requested.emit())
-        self.btn_apply.clicked.connect(self._emit_apply)
+    def refresh_from_config(self, cfg):
+        self.cfg = cfg.copy()
+        self.symbol_box.setText(DEFAULT_SYMBOL)
+        self.interval_box.setText(DEFAULT_INTERVAL)
+        self.ma_type_box.setCurrentText(self.cfg.get("maType", EMA))
+
+        for key, (box, as_float) in self.field_map.items():
+            value = self.cfg.get(key, 0)
+            text = self._format_float(value) if as_float else str(value)
+            box.setText(text)
 
     def get_params(self):
         return self.cfg.copy()
 
-    def _emit_apply(self):
-        self._save()
-        self.apply_strategy_requested.emit(self.get_params())
+    def set_paper_buttons_state(self, _running):
+        """No-op to preserve backwards compatibility."""
+        return None
+
 
 # ================================================================
-# SECTION 12 — SYMBOL SELECTOR PANEL
+# SECTION 12B — REMOTE CONTROL PANEL
 # ================================================================
 
-class SymbolSelector(QWidget):
-    symbol_selected = Signal(str)
+class RemoteControlPanel(QWidget):
+    start_paper = Signal()
+    stop_paper = Signal()
+    start_live = Signal()
+    stop_live = Signal()
+    start_optimizer = Signal()
+    manual_buy = Signal()
+    manual_sell = Signal()
+    apply_params = Signal()
+    exit_requested = Signal()
 
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(12)
 
-        layout.addWidget(QLabel("Search Symbol:"))
-        self.search_box = QLineEdit()
-        layout.addWidget(self.search_box)
-        self.search_box.textChanged.connect(self._filter)
+        self.buttons = {}
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(1)
-        self.table.setHorizontalHeaderLabels(["Symbol"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        layout.addWidget(self.table)
+        self._build_section(
+            layout,
+            "Paper Trading",
+            [
+                ("Start Paper Trading", "start_paper", self.start_paper.emit),
+                ("Stop Paper Trading", "stop_paper", self.stop_paper.emit),
+            ],
+        )
 
-        self.all_symbols = fetch_all_symbols()
-        self._populate(self.all_symbols)
+        self._build_section(
+            layout,
+            "Live Trading",
+            [
+                ("Start Live Trading", "start_live", self.start_live.emit),
+                ("Stop Live Trading", "stop_live", self.stop_live.emit),
+            ],
+        )
 
-        self.table.cellClicked.connect(self._clicked)
+        self._build_section(
+            layout,
+            "Operations",
+            [
+                ("Start Optimisation", "start_optimizer", self.start_optimizer.emit),
+                ("Apply Parameters", "apply_params", self.apply_params.emit),
+            ],
+        )
 
-    def _populate(self, symbols):
-        self.table.setRowCount(len(symbols))
-        for i, s in enumerate(symbols):
-            self.table.setItem(i, 0, QTableWidgetItem(s))
+        self._build_section(
+            layout,
+            "Manual Controls",
+            [
+                ("Manual Buy", "manual_buy", self.manual_buy.emit),
+                ("Manual Sell", "manual_sell", self.manual_sell.emit),
+            ],
+        )
 
-    def _filter(self, text):
-        text = text.upper().strip()
-        filtered = [s for s in self.all_symbols if text in s]
-        self._populate(filtered)
+        exit_btn = QPushButton("Exit")
+        exit_btn.clicked.connect(self.exit_requested.emit)
+        layout.addWidget(exit_btn)
 
-    def _clicked(self, row, col):
-        self.symbol_selected.emit(self.table.item(row, 0).text())
+        layout.addStretch(1)
+        self.set_states(False, False)
+
+    def _build_section(self, parent_layout, title, button_specs):
+        frame = QFrame()
+        frame.setFrameShape(QFrame.StyledPanel)
+        frame.setObjectName("RemoteSection")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setSpacing(6)
+        frame_layout.addWidget(QLabel(title))
+
+        for label, key, callback in button_specs:
+            btn = QPushButton(label)
+            btn.clicked.connect(callback)
+            frame_layout.addWidget(btn)
+            self.buttons[key] = btn
+
+        parent_layout.addWidget(frame)
+
+    def set_states(self, paper_active=False, live_active=False):
+        self.buttons["start_paper"].setEnabled(not paper_active)
+        self.buttons["stop_paper"].setEnabled(paper_active)
+        self.buttons["start_live"].setEnabled(not live_active)
+        self.buttons["stop_live"].setEnabled(live_active)
+        self.update_manual_state(can_buy=paper_active, can_sell=False)
+
+    def update_manual_state(self, can_buy=True, can_sell=False):
+        if "manual_buy" in self.buttons:
+            self.buttons["manual_buy"].setEnabled(can_buy)
+        if "manual_sell" in self.buttons:
+            self.buttons["manual_sell"].setEnabled(can_sell)
 
 # ================================================================
 # SECTION 13 — BACKTEST RESULTS PANEL
@@ -799,6 +1019,12 @@ class BacktestResults(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.table)
 
+        self.status_label = QLabel("Status: Idle")
+        self.status_label.setStyleSheet(
+            "font-size: 13px; color: #A0A8C2; padding-top: 6px;"
+        )
+        layout.addWidget(self.status_label)
+
     def update_results(self, metrics, trades):
         self.pnl_label.setText(f"Total PnL: {metrics['total_pnl']:.2f}%")
         self.winrate_label.setText(f"Win Rate: {metrics['win_rate']:.2f}%")
@@ -811,7 +1037,7 @@ class BacktestResults(QWidget):
         self.sl_label.setText(f"SL Exits: {sl_count}")
 
         rows=[]
-        open_entry=None
+        entry_price=None
 
         for t in trades:
             typ=t["type"]
@@ -820,23 +1046,24 @@ class BacktestResults(QWidget):
             ex=t.get("reason","")
 
             if typ=="BUY":
-                open_entry={"type":typ,"time":tm,"price":pr,"pnl":"","reason":""}
-                rows.append(open_entry)
+                entry_price=pr
+                rows.append({"type":typ,"time":tm,"price":pr,"pnl":"","reason":""})
 
             elif typ=="SELL":
-                # match to previous BUY
-                for r in reversed(rows):
-                    if r["type"]=="BUY" and r["pnl"]=="":
-                        pnl_pct=((pr - r["price"]) / r["price"])*100
-                        r["pnl"]=f"{pnl_pct:.2f}%"
-                        r["reason"]=ex
-                        break
-                rows.append({"type":typ,"time":tm,"price":pr,"pnl":"","reason":ex})
+                pnl_text=""
+                if entry_price is not None and entry_price != 0:
+                    pnl_pct=((pr - entry_price) / entry_price)*100
+                    pnl_text=f"{pnl_pct:.2f}%"
+                    entry_price=None
+                rows.append({"type":typ,"time":tm,"price":pr,"pnl":pnl_text,"reason":ex})
 
         self.table.setRowCount(len(rows))
         for i,r in enumerate(rows):
             for j,key in enumerate(["type","time","price","pnl","reason"]):
                 self.table.setItem(i,j,QTableWidgetItem(str(r.get(key,""))))
+
+    def set_status(self, text):
+        self.status_label.setText(text)
 
 # ================================================================
 # RANDOM PARAM GENERATOR (USED IN OPTIMIZER)
@@ -862,13 +1089,16 @@ def random_params():
 
 class LivePaperTrader:
     def __init__(self, params):
-        self.position=None
-        self.entry=None
         self.trades=[]
         self.params=params.copy()
+        self.reset()
 
     def update_params(self, p):
         self.params=p.copy()
+
+    def reset(self):
+        self.position=None
+        self.entry=None
 
     def process_live_tick(self, df):
         if len(df)<3: return
@@ -891,15 +1121,24 @@ class LivePaperTrader:
             tp_price=self.entry*(1+tp)
             sl_price=self.entry*(1-sl)
 
-            if row["close"]>=tp_price:
+            exit_reason=None
+            exit_price=None
+
+            if row["low"]<=sl_price:
+                exit_reason="SL"
+                exit_price=sl_price
+            elif row["high"]>=tp_price:
+                exit_reason="TP"
+                exit_price=tp_price
+
+            if exit_reason:
                 self.position=None
+                self.entry=None
                 self.trades.append({
-                    "type":"SELL","time":row.name,"price":row["close"],"reason":"TP"
-                })
-            elif row["close"]<=sl_price:
-                self.position=None
-                self.trades.append({
-                    "type":"SELL","time":row.name,"price":row["close"],"reason":"SL"
+                    "type":"SELL",
+                    "time":row.name,
+                    "price":exit_price,
+                    "reason":exit_reason
                 })
 
 # ================================================================
@@ -916,7 +1155,7 @@ class OptimizerWorker(QObject):
     finished=Signal(dict,list,dict)
     progress=Signal(int)
 
-    def __init__(self, df, trials=10000):
+    def __init__(self, df, trials=2000):
         super().__init__()
         self.df=df
         self.trials=trials
@@ -947,8 +1186,7 @@ class OptimizerWorker(QObject):
                 if best_metrics is None or m["total_pnl"]>best_metrics["total_pnl"]:
                     best_params=p; best_metrics=m; best_trades=tr
 
-                if i%200==0:
-                    self.progress.emit(i)
+                self.progress.emit(i)
 
         self.finished.emit(best_params,best_trades,best_metrics)
 
@@ -961,47 +1199,86 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("TradingView-Lite Terminal")
-        self.resize(1800,1000)
+
+        screen = QApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
+            width_limit = max(1, int(geometry.width() * 0.66))
+            height_limit = max(1, int(geometry.height() * 0.66))
+        else:
+            width_limit = 1280
+            height_limit = 800
+
+        self._normal_max_size = QSize(width_limit, height_limit)
+        self._normal_min_size = QSize(min(1180, width_limit), min(720, height_limit))
+        self.setMinimumSize(self._normal_min_size)
+        self.setMaximumSize(self._normal_max_size)
+        self.resize(self._normal_max_size)
 
         self.cfg=ConfigManager.load()
+        self.setStyleSheet(TRADINGVIEW_QSS)
 
         central=QWidget()
         self.setCentralWidget(central)
-        root=QHBoxLayout(central)
+        root=QVBoxLayout(central)
         root.setContentsMargins(0,0,0,0)
+        root.setSpacing(0)
 
-        self.symbol_panel = SymbolSelector()
+        self.header = InstrumentHeader(DEFAULT_SYMBOL, DEFAULT_INTERVAL)
+
         self.chart = ChartWidget()
         self.indicator_panel = IndicatorPanel()
         self.strategy_panel = StrategyEditor()
         self.results_panel = BacktestResults()
+        self.remote_panel = RemoteControlPanel()
 
         chart_split = QSplitter(Qt.Vertical)
         chart_split.addWidget(self.chart)
         chart_split.addWidget(self.indicator_panel)
-        chart_split.setSizes([700,300])
+        chart_split.setSizes([780,220])
+        chart_split.setChildrenCollapsible(False)
 
-        bottom_split = QSplitter(Qt.Vertical)
-        bottom_split.addWidget(chart_split)
-        bottom_split.addWidget(self.results_panel)
-        bottom_split.setSizes([800,200])
+        side_split = QSplitter(Qt.Vertical)
+        side_split.addWidget(self.strategy_panel)
+        side_split.addWidget(self.results_panel)
+        side_split.setSizes([600,400])
+        side_split.setChildrenCollapsible(False)
 
-        main_split = QSplitter(Qt.Horizontal)
-        main_split.addWidget(self.symbol_panel)
-        main_split.addWidget(bottom_split)
-        main_split.addWidget(self.strategy_panel)
-        main_split.setSizes([250,1300,350])
+        content_split = QSplitter(Qt.Horizontal)
+        content_split.addWidget(chart_split)
+        content_split.addWidget(side_split)
+        content_split.setStretchFactor(0,3)
+        content_split.setStretchFactor(1,1)
+        content_split.setChildrenCollapsible(False)
 
-        root.addWidget(main_split)
+        root.addWidget(self.header)
+        root.addWidget(content_split, 1)
 
-        self.symbol_panel.symbol_selected.connect(self.on_symbol_changed)
-        self.strategy_panel.backtest_requested.connect(self.run_backtest)
-        self.strategy_panel.apply_strategy_requested.connect(self.apply_strategy)
+        remote_dock = QDockWidget("Remote Control", self)
+        remote_dock.setWidget(self.remote_panel)
+        remote_dock.setFeatures(QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetMovable)
+        self.addDockWidget(Qt.RightDockWidgetArea, remote_dock)
+
+        self.remote_panel.start_paper.connect(lambda: self.start_paper_trading(self.cfg.copy()))
+        self.remote_panel.stop_paper.connect(self.stop_paper_trading)
+        self.remote_panel.start_live.connect(self.start_live_trading)
+        self.remote_panel.stop_live.connect(self.stop_live_trading)
+        self.remote_panel.start_optimizer.connect(self.run_backtest)
+        self.remote_panel.manual_buy.connect(self.manual_buy)
+        self.remote_panel.manual_sell.connect(self.manual_sell)
+        self.remote_panel.apply_params.connect(lambda: self.apply_strategy(self.cfg))
+        self.remote_panel.exit_requested.connect(self.close)
 
         self.stream=None
         self.df=None
+        self.paper_trader=None
+        self.paper_trading_active=False
+        self.live_trading_active=False
+        self.optimizer_trials = 2000
 
-        self.load_symbol(self.cfg["symbol"],self.cfg["interval"])
+        self.remote_panel.set_states(False, False)
+
+        self.load_symbol(DEFAULT_SYMBOL, DEFAULT_INTERVAL)
     # ============================================================
     # PARAM EXTRACTOR
     # ============================================================
@@ -1024,6 +1301,7 @@ class MainWindow(QMainWindow):
     # ============================================================
     def load_symbol(self, symbol, interval):
         print(f"[LOAD] {symbol} {interval}")
+        self.header.set_status("Loading SOL candles…")
         df = fetch_historical_klines(symbol, interval)
 
         df = df.astype({
@@ -1034,6 +1312,11 @@ class MainWindow(QMainWindow):
         _, df = run_tsi_strategy(df, **self.extract_strategy_params())
         self.df = df
 
+        last_close = df["close"].iloc[-1]
+        prev_close = df["close"].iloc[-2] if len(df) > 1 else last_close
+        change_pct = ((last_close - prev_close) / prev_close * 100) if prev_close else 0
+        self.header.update_quote(last_close, change_pct, interval)
+
         self.chart.plot_dataframe(df)
         self.indicator_panel.plot_tsi(df)
         self.start_stream(symbol, interval)
@@ -1041,34 +1324,40 @@ class MainWindow(QMainWindow):
     # ============================================================
     # APPLY STRATEGY
     # ============================================================
-    def apply_strategy(self, params):
-        self.cfg = params
-        ConfigManager.save(self.cfg)
+    def apply_strategy(self, params=None):
+        if params is not None:
+            self.cfg.update(params)
+            ConfigManager.save(self.cfg)
+            self.strategy_panel.refresh_from_config(self.cfg)
 
-        trades, df = run_tsi_strategy(self.df, **self.extract_strategy_params())
+        if self.df is None or self.df.empty:
+            return
+
+        trades, df = run_tsi_strategy(self.df.copy(), **self.extract_strategy_params())
         self.df = df
 
         self.chart.clear_indicators()
         self.chart.plot_indicator(df["TREND_MA"], "#ffaa00")
         self.indicator_panel.plot_tsi(df)
-        self.chart.plot_trades(trades)
+        if not self.paper_trading_active:
+            self.chart.plot_trades(trades)
 
-    # ============================================================
-    # SYMBOL SWITCH
-    # ============================================================
-    def on_symbol_changed(self, symbol):
-        self.cfg["symbol"] = symbol
-        ConfigManager.save(self.cfg)
-        self.load_symbol(symbol, self.cfg["interval"])
+        if self.paper_trader:
+            self.paper_trader.update_params(self.extract_strategy_params())
 
     # ============================================================
     # RUN OPTIMIZER
     # ============================================================
     def run_backtest(self):
+        if self.df is None or self.df.empty:
+            self.results_panel.set_status("Status: No data to backtest")
+            return
+
         print("[OPT] Starting optimizer...")
+        self.results_panel.set_status("Status: Running backtest…")
 
         self.opt_thread = QThread()
-        self.opt_worker = OptimizerWorker(self.df.copy(), trials=10000)
+        self.opt_worker = OptimizerWorker(self.df.copy(), trials=self.optimizer_trials)
         self.opt_worker.moveToThread(self.opt_thread)
 
         self.opt_thread.started.connect(self.opt_worker.run)
@@ -1085,24 +1374,36 @@ class MainWindow(QMainWindow):
     # OPTIMIZER PROGRESS
     # ============================================================
     def optimizer_progress(self, n):
-        print(f"[OPT] Completed {n}/10000")
+        total = getattr(self.opt_worker, "trials", self.optimizer_trials)
+        self.results_panel.set_status(
+            f"Status: Running backtest… {min(n, total)}/{total}"
+        )
+        print(f"[OPT] Completed {n}/{total}")
 
     # ============================================================
     # OPTIMIZER COMPLETE
     # ============================================================
     def optimizer_finished(self, params, trades, metrics):
         print("[OPT] COMPLETE")
+
+        if not params or not metrics:
+            self.results_panel.set_status("Status: Backtest failed")
+            return
+
         print("Best Params:", params)
         print(f"Best PnL: {metrics['total_pnl']:.2f}%")
 
         self.cfg.update(params)
         ConfigManager.save(self.cfg)
+        self.strategy_panel.refresh_from_config(self.cfg)
 
         print("[OPT] Applying optimized parameters...")
         self.apply_strategy(self.cfg)
 
+        trades = trades or []
         self.results_panel.update_results(metrics, trades)
         self.chart.plot_trades(trades)
+        self.results_panel.set_status("Status: Backtest complete")
 
         print("[OPT] Optimized parameters ACTIVE")
 
@@ -1116,11 +1417,121 @@ class MainWindow(QMainWindow):
         self.stream = CandleStream(symbol, interval)
         self.stream.new_candle.connect(self.on_live_candle)
         self.stream.start()
+        self.header.set_status("Connecting to Binance stream…")
+
+    def start_paper_trading(self, params):
+        if params:
+            self.cfg.update(params)
+            ConfigManager.save(self.cfg)
+            self.strategy_panel.refresh_from_config(self.cfg)
+
+        trading_params = self.extract_strategy_params()
+
+        if self.paper_trader is None:
+            self.paper_trader = LivePaperTrader(trading_params)
+        else:
+            self.paper_trader.update_params(trading_params)
+            self.paper_trader.reset()
+            self.paper_trader.trades.clear()
+
+        self.paper_trading_active = True
+        self.strategy_panel.set_paper_buttons_state(True)
+        self.chart.plot_trades(self.paper_trader.trades)
+        self.remote_panel.set_states(True, self.live_trading_active)
+        self._sync_manual_buttons()
+
+    def stop_paper_trading(self):
+        if self.paper_trader:
+            self.paper_trader.reset()
+            self.paper_trader.trades.clear()
+        self.paper_trading_active = False
+        self.strategy_panel.set_paper_buttons_state(False)
+        self.chart.plot_trades([])
+        self.apply_strategy()
+        self.remote_panel.set_states(False, self.live_trading_active)
+        self._sync_manual_buttons()
+
+    # ============================================================
+    # LIVE TRADING TOGGLES
+    # ============================================================
+    def start_live_trading(self):
+        if self.live_trading_active:
+            return
+        self.live_trading_active = True
+        self.remote_panel.set_states(self.paper_trading_active, True)
+        self.header.set_status("LIVE TRADING • Armed")
+        self._sync_manual_buttons()
+
+    def stop_live_trading(self):
+        if not self.live_trading_active:
+            return
+        self.live_trading_active = False
+        self.remote_panel.set_states(self.paper_trading_active, False)
+        status_text = "LIVE TRADING • Active" if self.live_trading_active else "LIVE • Binance"
+        self.header.set_status(status_text)
+        self._sync_manual_buttons()
+
+    # ============================================================
+    # MANUAL TRADE CONTROLS
+    # ============================================================
+    def manual_buy(self):
+        if self.df is None or self.df.empty:
+            return
+
+        if self.paper_trader is None:
+            self.paper_trader = LivePaperTrader(self.extract_strategy_params())
+
+        if self.paper_trader.position == "LONG":
+            return
+
+        price = float(self.df["close"].iloc[-1])
+        timestamp = self.df.index[-1]
+
+        self.paper_trader.position = "LONG"
+        self.paper_trader.entry = price
+        self.paper_trader.trades.append({
+            "type": "BUY",
+            "time": timestamp,
+            "price": price,
+            "reason": "MANUAL"
+        })
+
+        self.chart.plot_trades(self.paper_trader.trades)
+        self._sync_manual_buttons()
+
+    def manual_sell(self):
+        if not self.paper_trader or self.paper_trader.position != "LONG" or self.df is None or self.df.empty:
+            return
+
+        price = float(self.df["close"].iloc[-1])
+        timestamp = self.df.index[-1]
+
+        self.paper_trader.position = None
+        self.paper_trader.entry = None
+        self.paper_trader.trades.append({
+            "type": "SELL",
+            "time": timestamp,
+            "price": price,
+            "reason": "MANUAL"
+        })
+
+        self.chart.plot_trades(self.paper_trader.trades)
+        self._sync_manual_buttons()
+
+    def _sync_manual_buttons(self):
+        if not self.paper_trading_active:
+            self.remote_panel.update_manual_state(can_buy=False, can_sell=False)
+            return
+        can_sell = bool(self.paper_trader and self.paper_trader.position == "LONG")
+        can_buy = not can_sell
+        self.remote_panel.update_manual_state(can_buy=can_buy, can_sell=can_sell)
 
     # ============================================================
     # LIVE CANDLE HANDLER
     # ============================================================
     def on_live_candle(self, candle):
+        status_text = "LIVE TRADING • Active" if self.live_trading_active else "LIVE • Binance"
+        self.header.set_status(status_text)
         ts = pd.to_datetime(candle["time"]).replace(second=0, microsecond=0)
         o = float(candle["open"])
         h = float(candle["high"])
@@ -1130,8 +1541,10 @@ class MainWindow(QMainWindow):
 
         raw_cols = ["open", "high", "low", "close", "volume"]
 
+        new_bar = ts not in self.df.index
+
         # update / append row
-        if ts in self.df.index:
+        if not new_bar:
             self.df.loc[ts, raw_cols] = [o, h, l, c_, v]
         else:
             new_row = {col: np.nan for col in self.df.columns}
@@ -1167,7 +1580,6 @@ class MainWindow(QMainWindow):
         ])
 
         # UPDATE CHART
-        self.chart.plot_dataframe(plot_df)
         self.chart.update_live_candle({
             "time": ts,
             "open": o,
@@ -1180,10 +1592,33 @@ class MainWindow(QMainWindow):
 
         # UPDATE LIVE TSI PANEL
         if len(plot_df) > 0:
-            self.indicator_panel.update_live_tsi({
+            latest_values = {
                 "TSI": plot_df["TSI"].iloc[-1],
                 "TSI_SIGNAL": plot_df["TSI_SIGNAL"].iloc[-1]
-            })
+            }
+
+            if new_bar or candle.get("is_closed", False):
+                self.indicator_panel.plot_tsi(plot_df)
+            else:
+                self.indicator_panel.update_live_tsi(latest_values)
+
+            last_close = plot_df["close"].iloc[-1]
+            prev_close = plot_df["close"].iloc[-2] if len(plot_df) > 1 else last_close
+            change_pct = ((last_close - prev_close) / prev_close * 100) if prev_close else 0
+            self.header.update_quote(last_close, change_pct, self.cfg["interval"])
+
+        if self.paper_trading_active and self.paper_trader:
+            self.paper_trader.process_live_tick(self.df)
+            self.chart.plot_trades(self.paper_trader.trades)
+            self._sync_manual_buttons()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange:
+            if self.windowState() & Qt.WindowFullScreen:
+                self.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX)
+            else:
+                self.setMaximumSize(self._normal_max_size)
+        super().changeEvent(event)
 
 
 # ================================================================
