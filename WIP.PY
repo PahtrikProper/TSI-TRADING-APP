@@ -406,6 +406,31 @@ def compute_backtest_metrics(trades, df):
         "num_trades": len(pnl_list)
     }
 
+
+def summarize_trade_stats(trades):
+    if not trades:
+        return {"pnl": 0.0, "buys": 0, "sells": 0}
+
+    equity = 1.0
+    buys = sum(1 for t in trades if t.get("type") == "BUY")
+    sells = sum(1 for t in trades if t.get("type") == "SELL")
+
+    i = 0
+    while i + 1 < len(trades):
+        entry = trades[i]
+        exit_trade = trades[i + 1]
+
+        if entry.get("type") == "BUY" and exit_trade.get("type") == "SELL":
+            entry_price = float(entry.get("price", 0) or 0)
+            exit_price = float(exit_trade.get("price", 0) or 0)
+            if entry_price:
+                equity *= (1 + (exit_price - entry_price) / entry_price)
+            i += 2
+        else:
+            i += 1
+
+    return {"pnl": (equity - 1) * 100, "buys": buys, "sells": sells}
+
 def backtest_strategy(df, params=None):
     if params is None: params={}
     trades, df = run_tsi_strategy(
@@ -968,6 +993,8 @@ class RemoteControlPanel(QWidget):
             ],
         )
 
+        self._build_stats_section(layout)
+
         exit_btn = QPushButton("Exit")
         exit_btn.clicked.connect(self.exit_requested.emit)
         layout.addWidget(exit_btn)
@@ -1052,82 +1079,129 @@ class RemoteControlPanel(QWidget):
         if "manual_sell" in self.buttons:
             self.buttons["manual_sell"].setEnabled(can_sell)
 
+    def _build_stats_section(self, parent_layout):
+        frame = QFrame()
+        frame.setFrameShape(QFrame.StyledPanel)
+        frame.setObjectName("RemoteSection")
+        layout = QVBoxLayout(frame)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("Trading Stats"))
+
+        self.stats_mode = QLabel("Mode: Idle")
+        self.stats_pnl = QLabel("PnL: 0.00%")
+        self.stats_buys = QLabel("Buys: 0")
+        self.stats_sells = QLabel("Sells: 0")
+
+        for lbl in [self.stats_mode, self.stats_pnl, self.stats_buys, self.stats_sells]:
+            layout.addWidget(lbl)
+
+        parent_layout.addWidget(frame)
+
+    def update_live_stats(self, mode="Idle", pnl=0.0, buys=0, sells=0):
+        self.stats_mode.setText(f"Mode: {mode}")
+        self.stats_pnl.setText(f"PnL: {pnl:.2f}%")
+        self.stats_buys.setText(f"Buys: {buys}")
+        self.stats_sells.setText(f"Sells: {sells}")
+
 # ================================================================
 # SECTION 13 — BACKTEST RESULTS PANEL
 # ================================================================
 
-class BacktestResults(QWidget):
+class RemoteBacktestPanel(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(12)
 
-        self.pnl_label = QLabel("Total PnL: -")
-        self.winrate_label = QLabel("Win Rate: -")
-        self.mdd_label = QLabel("Max Drawdown: -")
-        self.trades_label = QLabel("Trades: -")
-        self.tp_label = QLabel("TP Exits: -")
-        self.sl_label = QLabel("SL Exits: -")
-
-        for lbl in [
-            self.pnl_label, self.winrate_label, self.mdd_label,
-            self.trades_label, self.tp_label, self.sl_label
+        summary_frame, summary_layout = self._create_section("Backtest Summary")
+        self.summary_labels = {}
+        for key, label in [
+            ("pnl", "Total PnL"),
+            ("win", "Win Rate"),
+            ("mdd", "Max Drawdown"),
+            ("trades", "Trades"),
+            ("tp", "TP Exits"),
+            ("sl", "SL Exits"),
         ]:
-            lbl.setStyleSheet("color: white; font-size: 13px;")
-            layout.addWidget(lbl)
+            lbl = QLabel(f"{label}: -")
+            summary_layout.addWidget(lbl)
+            self.summary_labels[key] = lbl
+        layout.addWidget(summary_frame)
 
+        table_frame, table_layout = self._create_section("Backtest Trades")
         self.table = QTableWidget()
         self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(
-            ["Type", "Time", "Price", "PNL %", "Exit Reason"]
-        )
+        self.table.setHorizontalHeaderLabels([
+            "Type", "Time", "Price", "PNL %", "Reason"
+        ])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        layout.addWidget(self.table)
+        table_layout.addWidget(self.table)
+        layout.addWidget(table_frame)
 
-        self.status_label = QLabel("Status: Idle")
-        self.status_label.setStyleSheet(
-            "font-size: 13px; color: #A0A8C2; padding-top: 6px;"
-        )
-        layout.addWidget(self.status_label)
+        status_frame, status_layout = self._create_section("Status")
+        self.status_label = QLabel("Idle")
+        status_layout.addWidget(self.status_label)
+        layout.addWidget(status_frame)
+
+    def _create_section(self, title):
+        frame = QFrame()
+        frame.setFrameShape(QFrame.StyledPanel)
+        frame.setObjectName("RemoteSection")
+        section_layout = QVBoxLayout(frame)
+        section_layout.setSpacing(6)
+        section_layout.addWidget(QLabel(title))
+        return frame, section_layout
 
     def update_results(self, metrics, trades):
-        self.pnl_label.setText(f"Total PnL: {metrics['total_pnl']:.2f}%")
-        self.winrate_label.setText(f"Win Rate: {metrics['win_rate']:.2f}%")
-        self.mdd_label.setText(f"Max Drawdown: {metrics['max_drawdown']:.2f}%")
-        self.trades_label.setText(f"Trades: {metrics['num_trades']}")
+        self.summary_labels["pnl"].setText(f"Total PnL: {metrics['total_pnl']:.2f}%")
+        self.summary_labels["win"].setText(f"Win Rate: {metrics['win_rate']:.2f}%")
+        self.summary_labels["mdd"].setText(f"Max Drawdown: {metrics['max_drawdown']:.2f}%")
+        self.summary_labels["trades"].setText(f"Trades: {metrics['num_trades']}")
 
         tp_count = sum(1 for t in trades if t.get("reason") == "TP")
         sl_count = sum(1 for t in trades if t.get("reason") == "SL")
-        self.tp_label.setText(f"TP Exits: {tp_count}")
-        self.sl_label.setText(f"SL Exits: {sl_count}")
+        self.summary_labels["tp"].setText(f"TP Exits: {tp_count}")
+        self.summary_labels["sl"].setText(f"SL Exits: {sl_count}")
 
-        rows=[]
-        entry_price=None
+        rows = []
+        entry_price = None
 
         for t in trades:
-            typ=t["type"]
-            tm=str(t["time"])
-            pr=t["price"]
-            ex=t.get("reason","")
+            typ = t["type"]
+            tm = str(t["time"])
+            pr = t["price"]
+            reason = t.get("reason", "")
 
-            if typ=="BUY":
-                entry_price=pr
-                rows.append({"type":typ,"time":tm,"price":pr,"pnl":"","reason":""})
-
-            elif typ=="SELL":
-                pnl_text=""
-                if entry_price is not None and entry_price != 0:
-                    pnl_pct=((pr - entry_price) / entry_price)*100
-                    pnl_text=f"{pnl_pct:.2f}%"
-                    entry_price=None
-                rows.append({"type":typ,"time":tm,"price":pr,"pnl":pnl_text,"reason":ex})
+            if typ == "BUY":
+                entry_price = pr
+                rows.append({
+                    "type": typ,
+                    "time": tm,
+                    "price": pr,
+                    "pnl": "",
+                    "reason": ""
+                })
+            elif typ == "SELL":
+                pnl_text = ""
+                if entry_price:
+                    pnl_pct = ((pr - entry_price) / entry_price) * 100
+                    pnl_text = f"{pnl_pct:.2f}%"
+                    entry_price = None
+                rows.append({
+                    "type": typ,
+                    "time": tm,
+                    "price": pr,
+                    "pnl": pnl_text,
+                    "reason": reason
+                })
 
         self.table.setRowCount(len(rows))
-        for i,r in enumerate(rows):
-            for j,key in enumerate(["type","time","price","pnl","reason"]):
-                self.table.setItem(i,j,QTableWidgetItem(str(r.get(key,""))))
+        for i, row in enumerate(rows):
+            for j, key in enumerate(["type", "time", "price", "pnl", "reason"]):
+                self.table.setItem(i, j, QTableWidgetItem(str(row.get(key, ""))))
 
     def set_status(self, text):
         self.status_label.setText(text)
@@ -1168,7 +1242,8 @@ class LivePaperTrader:
         self.entry=None
 
     def process_live_tick(self, df):
-        if len(df)<3: return
+        if len(df)<3:
+            return None
 
         row=df.iloc[-1]; prev=df.iloc[-2]
         long_signal = (row["TSI"]>row["TSI_SIGNAL"]) and (prev["TSI"]<=prev["TSI_SIGNAL"])
@@ -1182,7 +1257,7 @@ class LivePaperTrader:
             self.trades.append({
                 "type":"BUY","time":row.name,"price":self.entry
             })
-            return
+            return None
 
         if self.position=="LONG":
             tp_price=self.entry*(1+tp)
@@ -1199,14 +1274,28 @@ class LivePaperTrader:
                 exit_price=tp_price
 
             if exit_reason:
+                entry_price = self.entry
                 self.position=None
                 self.entry=None
-                self.trades.append({
+                trade = {
                     "type":"SELL",
                     "time":row.name,
                     "price":exit_price,
-                    "reason":exit_reason
-                })
+                    "reason":exit_reason,
+                }
+                if entry_price:
+                    trade["entry_price"] = entry_price
+                    trade["pnl"] = ((exit_price-entry_price)/entry_price)*100
+                self.trades.append(trade)
+                return {
+                    "time": row.name,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "reason": exit_reason,
+                    "pnl": trade.get("pnl", 0.0)
+                }
+
+        return None
 
 # ================================================================
 # OPTIMIZER — MULTIPROCESS
@@ -1277,7 +1366,33 @@ class MainWindow(QMainWindow):
             height_limit = 800
 
         self._normal_max_size = QSize(width_limit, height_limit)
-        self._normal_min_size = QSize(min(1180, width_limit), min(720, height_limit))
+
+        width_margin = max(80, int(width_limit * 0.15))
+        height_margin = max(80, int(height_limit * 0.15))
+
+        width_cap = width_limit - 40 if width_limit > 40 else width_limit
+        height_cap = height_limit - 40 if height_limit > 40 else height_limit
+
+        min_width = max(900, width_limit - width_margin)
+        min_height = max(640, height_limit - height_margin)
+
+        min_width = min(min_width, width_cap)
+        min_height = min(min_height, height_cap)
+
+        if width_cap >= 720:
+            min_width = max(min_width, 720)
+        if height_cap >= 560:
+            min_height = max(min_height, 560)
+
+        min_width = max(min_width, min(640, width_cap))
+        min_height = max(min_height, min(520, height_cap))
+
+        if min_width <= 0:
+            min_width = width_cap or width_limit
+        if min_height <= 0:
+            min_height = height_cap or height_limit
+
+        self._normal_min_size = QSize(int(min_width), int(min_height))
         self.setMinimumSize(self._normal_min_size)
         self.setMaximumSize(self._normal_max_size)
         self.resize(self._normal_max_size)
@@ -1296,7 +1411,7 @@ class MainWindow(QMainWindow):
         self.chart = ChartWidget()
         self.indicator_panel = IndicatorPanel()
         self.strategy_panel = StrategyEditor()
-        self.results_panel = BacktestResults()
+        self.remote_results_panel = RemoteBacktestPanel()
         self.remote_panel = RemoteControlPanel()
 
         chart_split = QSplitter(Qt.Vertical)
@@ -1305,15 +1420,9 @@ class MainWindow(QMainWindow):
         chart_split.setSizes([780,220])
         chart_split.setChildrenCollapsible(False)
 
-        side_split = QSplitter(Qt.Vertical)
-        side_split.addWidget(self.strategy_panel)
-        side_split.addWidget(self.results_panel)
-        side_split.setSizes([600,400])
-        side_split.setChildrenCollapsible(False)
-
         content_split = QSplitter(Qt.Horizontal)
         content_split.addWidget(chart_split)
-        content_split.addWidget(side_split)
+        content_split.addWidget(self.strategy_panel)
         content_split.setStretchFactor(0,3)
         content_split.setStretchFactor(1,1)
         content_split.setChildrenCollapsible(False)
@@ -1325,6 +1434,12 @@ class MainWindow(QMainWindow):
         remote_dock.setWidget(self.remote_panel)
         remote_dock.setFeatures(QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetMovable)
         self.addDockWidget(Qt.RightDockWidgetArea, remote_dock)
+
+        backtest_remote_dock = QDockWidget("Backtest Remote", self)
+        backtest_remote_dock.setWidget(self.remote_results_panel)
+        backtest_remote_dock.setFeatures(QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetMovable)
+        self.addDockWidget(Qt.RightDockWidgetArea, backtest_remote_dock)
+        self.tabifyDockWidget(remote_dock, backtest_remote_dock)
 
         self.remote_panel.start_paper.connect(lambda: self.start_paper_trading(self.cfg.copy()))
         self.remote_panel.stop_paper.connect(self.stop_paper_trading)
@@ -1342,6 +1457,9 @@ class MainWindow(QMainWindow):
         self.paper_trader=None
         self.paper_trading_active=False
         self.live_trading_active=False
+        self.live_trade_history = []
+        self.live_position = None
+        self.live_entry = None
         self.optimizer_trials = 2000
 
         self.remote_panel.set_states(False, False)
@@ -1349,6 +1467,7 @@ class MainWindow(QMainWindow):
             self.cfg.get("api_key", ""),
             self.cfg.get("api_secret", "")
         )
+        self.update_live_stats_display()
 
         self.load_symbol(DEFAULT_SYMBOL, DEFAULT_INTERVAL)
     # ============================================================
@@ -1411,7 +1530,7 @@ class MainWindow(QMainWindow):
         self.chart.clear_indicators()
         self.chart.plot_indicator(df["TREND_MA"], "#ffaa00")
         self.indicator_panel.plot_tsi(df)
-        if not self.paper_trading_active:
+        if not self.paper_trading_active and not self.live_trading_active:
             self.chart.plot_trades(trades)
 
         if self.paper_trader:
@@ -1429,11 +1548,11 @@ class MainWindow(QMainWindow):
     # ============================================================
     def run_backtest(self):
         if self.df is None or self.df.empty:
-            self.results_panel.set_status("Status: No data to backtest")
+            self.remote_results_panel.set_status("Status: No data to backtest")
             return
 
         print("[OPT] Starting optimizer...")
-        self.results_panel.set_status("Status: Running backtest…")
+        self.remote_results_panel.set_status("Status: Running backtest…")
 
         self.opt_thread = QThread()
         self.opt_worker = OptimizerWorker(self.df.copy(), trials=self.optimizer_trials)
@@ -1454,7 +1573,7 @@ class MainWindow(QMainWindow):
     # ============================================================
     def optimizer_progress(self, n):
         total = getattr(self.opt_worker, "trials", self.optimizer_trials)
-        self.results_panel.set_status(
+        self.remote_results_panel.set_status(
             f"Status: Running backtest… {min(n, total)}/{total}"
         )
         print(f"[OPT] Completed {n}/{total}")
@@ -1466,7 +1585,7 @@ class MainWindow(QMainWindow):
         print("[OPT] COMPLETE")
 
         if not params or not metrics:
-            self.results_panel.set_status("Status: Backtest failed")
+            self.remote_results_panel.set_status("Status: Backtest failed")
             return
 
         print("Best Params:", params)
@@ -1480,9 +1599,10 @@ class MainWindow(QMainWindow):
         self.apply_strategy(self.cfg)
 
         trades = trades or []
-        self.results_panel.update_results(metrics, trades)
-        self.chart.plot_trades(trades)
-        self.results_panel.set_status("Status: Backtest complete")
+        self.remote_results_panel.update_results(metrics, trades)
+        if not (self.paper_trading_active or self.live_trading_active):
+            self.chart.plot_trades(trades)
+        self.remote_results_panel.set_status("Status: Backtest complete")
 
         print("[OPT] Optimized parameters ACTIVE")
 
@@ -1518,6 +1638,7 @@ class MainWindow(QMainWindow):
         self.chart.plot_trades(self.paper_trader.trades)
         self.remote_panel.set_states(True, self.live_trading_active)
         self._sync_manual_buttons()
+        self.update_live_stats_display()
 
     def stop_paper_trading(self):
         if self.paper_trader:
@@ -1525,10 +1646,14 @@ class MainWindow(QMainWindow):
             self.paper_trader.trades.clear()
         self.paper_trading_active = False
         self.strategy_panel.set_paper_buttons_state(False)
-        self.chart.plot_trades([])
-        self.apply_strategy()
+        if self.live_trading_active:
+            self.chart.plot_trades(self.live_trade_history)
+        else:
+            self.chart.plot_trades([])
+            self.apply_strategy()
         self.remote_panel.set_states(False, self.live_trading_active)
         self._sync_manual_buttons()
+        self.update_live_stats_display()
 
     # ============================================================
     # LIVE TRADING TOGGLES
@@ -1540,6 +1665,12 @@ class MainWindow(QMainWindow):
         self.remote_panel.set_states(self.paper_trading_active, True)
         self.header.set_status("LIVE TRADING • Armed")
         self._sync_manual_buttons()
+        self.live_trade_history.clear()
+        self.live_position = None
+        self.live_entry = None
+        if not self.paper_trading_active:
+            self.chart.plot_trades(self.live_trade_history)
+        self.update_live_stats_display()
 
     def stop_live_trading(self):
         if not self.live_trading_active:
@@ -1549,6 +1680,9 @@ class MainWindow(QMainWindow):
         status_text = "LIVE TRADING • Active" if self.live_trading_active else "LIVE • Binance"
         self.header.set_status(status_text)
         self._sync_manual_buttons()
+        if not self.paper_trading_active:
+            self.chart.plot_trades([])
+        self.update_live_stats_display()
 
     # ============================================================
     # MANUAL TRADE CONTROLS
@@ -1557,53 +1691,145 @@ class MainWindow(QMainWindow):
         if self.df is None or self.df.empty:
             return
 
-        if self.paper_trader is None:
-            self.paper_trader = LivePaperTrader(self.extract_strategy_params())
-
-        if self.paper_trader.position == "LONG":
-            return
-
         price = float(self.df["close"].iloc[-1])
         timestamp = self.df.index[-1]
 
-        self.paper_trader.position = "LONG"
-        self.paper_trader.entry = price
-        self.paper_trader.trades.append({
-            "type": "BUY",
-            "time": timestamp,
-            "price": price,
-            "reason": "MANUAL"
-        })
+        if self.paper_trading_active:
+            if self.paper_trader is None:
+                self.paper_trader = LivePaperTrader(self.extract_strategy_params())
 
-        self.chart.plot_trades(self.paper_trader.trades)
+            if self.paper_trader.position == "LONG":
+                return
+
+            self.paper_trader.position = "LONG"
+            self.paper_trader.entry = price
+            self.paper_trader.trades.append({
+                "type": "BUY",
+                "time": timestamp,
+                "price": price,
+                "reason": "MANUAL"
+            })
+            self.chart.plot_trades(self.paper_trader.trades)
+
+        elif self.live_trading_active:
+            if self.live_position == "LONG":
+                return
+            self.live_position = "LONG"
+            self.live_entry = price
+            self.live_trade_history.append({
+                "type": "BUY",
+                "time": timestamp,
+                "price": price,
+                "reason": "MANUAL"
+            })
+            if not self.paper_trading_active:
+                self.chart.plot_trades(self.live_trade_history)
+        else:
+            return
+
         self._sync_manual_buttons()
+        self.update_live_stats_display()
 
     def manual_sell(self):
-        if not self.paper_trader or self.paper_trader.position != "LONG" or self.df is None or self.df.empty:
+        if self.df is None or self.df.empty:
             return
 
         price = float(self.df["close"].iloc[-1])
         timestamp = self.df.index[-1]
 
-        self.paper_trader.position = None
-        self.paper_trader.entry = None
-        self.paper_trader.trades.append({
-            "type": "SELL",
-            "time": timestamp,
-            "price": price,
-            "reason": "MANUAL"
-        })
+        if self.paper_trading_active:
+            if not self.paper_trader or self.paper_trader.position != "LONG":
+                return
 
-        self.chart.plot_trades(self.paper_trader.trades)
+            entry_price = self.paper_trader.entry
+            self.paper_trader.position = None
+            self.paper_trader.entry = None
+            self.paper_trader.trades.append({
+                "type": "SELL",
+                "time": timestamp,
+                "price": price,
+                "reason": "MANUAL"
+            })
+            self.chart.plot_trades(self.paper_trader.trades)
+            self._handle_trade_exit("Paper", entry_price, price, timestamp)
+
+        elif self.live_trading_active:
+            if self.live_position != "LONG":
+                return
+            entry_price = self.live_entry
+            self.live_position = None
+            self.live_entry = None
+            self.live_trade_history.append({
+                "type": "SELL",
+                "time": timestamp,
+                "price": price,
+                "reason": "MANUAL"
+            })
+            if not self.paper_trading_active:
+                self.chart.plot_trades(self.live_trade_history)
+            self._handle_trade_exit("Live", entry_price, price, timestamp)
+        else:
+            return
+
         self._sync_manual_buttons()
+        self.update_live_stats_display()
 
     def _sync_manual_buttons(self):
-        if not self.paper_trading_active:
+        if not (self.paper_trading_active or self.live_trading_active):
             self.remote_panel.update_manual_state(can_buy=False, can_sell=False)
             return
-        can_sell = bool(self.paper_trader and self.paper_trader.position == "LONG")
-        can_buy = not can_sell
+
+        if self.paper_trading_active:
+            can_sell = bool(self.paper_trader and self.paper_trader.position == "LONG")
+            can_buy = not can_sell
+        else:
+            can_sell = self.live_position == "LONG"
+            can_buy = not can_sell
+
         self.remote_panel.update_manual_state(can_buy=can_buy, can_sell=can_sell)
+
+    def update_live_stats_display(self):
+        if self.paper_trading_active and self.paper_trader:
+            stats = summarize_trade_stats(self.paper_trader.trades)
+            mode = "Paper"
+        elif self.live_trading_active:
+            stats = summarize_trade_stats(self.live_trade_history)
+            mode = "Live"
+        else:
+            stats = {"pnl": 0.0, "buys": 0, "sells": 0}
+            mode = "Idle"
+
+        self.remote_panel.update_live_stats(
+            mode=mode,
+            pnl=stats["pnl"],
+            buys=stats["buys"],
+            sells=stats["sells"]
+        )
+
+    def _handle_trade_exit(self, mode, entry_price, exit_price, timestamp):
+        if entry_price in (None, 0) or exit_price is None:
+            return
+
+        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        if pnl_pct < 0:
+            self.run_loss_window_backtest(mode=mode, end_time=timestamp)
+
+    def run_loss_window_backtest(self, mode="Loss", end_time=None):
+        if self.df is None or self.df.empty:
+            return
+
+        end_time = end_time or self.df.index[-1]
+        start_time = end_time - pd.Timedelta(hours=24)
+        window_df = self.df[self.df.index >= start_time].copy()
+
+        if window_df.empty or len(window_df.dropna(subset=["close"])) < 2:
+            self.remote_results_panel.set_status("Status: Loss scan skipped (insufficient data)")
+            return
+
+        trades, analyzed_df = run_tsi_strategy(window_df.copy(), **self.extract_strategy_params())
+        metrics = compute_backtest_metrics(trades, analyzed_df)
+        self.remote_results_panel.update_results(metrics, trades)
+        self.remote_results_panel.set_status(f"Status: Loss scan ({mode})")
 
     # ============================================================
     # LIVE CANDLE HANDLER
@@ -1687,9 +1913,17 @@ class MainWindow(QMainWindow):
             self.header.update_quote(last_close, change_pct, self.cfg["interval"])
 
         if self.paper_trading_active and self.paper_trader:
-            self.paper_trader.process_live_tick(self.df)
+            exit_report = self.paper_trader.process_live_tick(self.df)
             self.chart.plot_trades(self.paper_trader.trades)
             self._sync_manual_buttons()
+            self.update_live_stats_display()
+            if exit_report:
+                self._handle_trade_exit(
+                    "Paper",
+                    exit_report.get("entry_price"),
+                    exit_report.get("exit_price"),
+                    exit_report.get("time")
+                )
 
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange:
