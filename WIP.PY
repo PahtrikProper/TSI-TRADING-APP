@@ -243,38 +243,143 @@ class CandleStream(QObject):
             except: pass
 
 # ================================================================
-# SECTION 4 — INDICATORS
+# SECTION 4 — INDICATORS (MANUAL CALCS TO MATCH TRADINGVIEW)
 # ================================================================
 
-def ema(series, length): return series.ewm(span=length, adjust=False).mean()
-def sma(series, length): return series.rolling(length).mean()
+def _nan_list(length):
+    return [np.nan] * length
 
-def wma(series, length):
-    w = np.arange(1, length + 1)
-    return series.rolling(length).apply(lambda x: np.dot(x, w) / w.sum(), raw=True)
 
-def moving_average(series, length, ma_type):
+def manual_sma(values, length):
+    if length <= 0:
+        return _nan_list(len(values))
+
+    out = _nan_list(len(values))
+    window_sum = 0.0
+    valid = 0
+
+    for i, v in enumerate(values):
+        if not np.isnan(v):
+            window_sum += v
+            valid += 1
+
+        if i >= length:
+            exiting = values[i - length]
+            if not np.isnan(exiting):
+                window_sum -= exiting
+                valid -= 1
+
+        if i >= length - 1 and valid == length:
+            out[i] = window_sum / length
+
+    return out
+
+
+def manual_ema(values, length):
+    if length <= 0:
+        return _nan_list(len(values))
+
+    out = _nan_list(len(values))
+    alpha = 2 / (length + 1)
+
+    seed = manual_sma(values, length)
+    if len(values) >= length and not np.isnan(seed[length - 1]):
+        out[length - 1] = seed[length - 1]
+    else:
+        return out
+
+    for i in range(length, len(values)):
+        price = values[i]
+        prev = out[i - 1]
+        if np.isnan(price) or np.isnan(prev):
+            out[i] = np.nan
+            continue
+        out[i] = prev + alpha * (price - prev)
+
+    return out
+
+
+def manual_wma(values, length):
+    if length <= 0:
+        return _nan_list(len(values))
+
+    out = _nan_list(len(values))
+    weights = list(range(1, length + 1))
+    total_weight = sum(weights)
+
+    for i in range(length - 1, len(values)):
+        window = values[i - length + 1 : i + 1]
+        if any(np.isnan(w) for w in window):
+            continue
+        weighted_sum = sum(w * v for w, v in zip(weights, window))
+        out[i] = weighted_sum / total_weight
+
+    return out
+
+
+def manual_moving_average(values, length, ma_type):
     t = ma_type.upper()
-    if t == "EMA": return ema(series, length)
-    if t == "SMA": return sma(series, length)
-    if t == "WMA": return wma(series, length)
+    if t == "EMA":
+        return manual_ema(values, length)
+    if t == "SMA":
+        return manual_sma(values, length)
+    if t == "WMA":
+        return manual_wma(values, length)
     raise ValueError("Invalid MA type")
 
-def double_smooth(series, long_len, short_len):
-    return ema(ema(series, long_len), short_len)
+
+def manual_double_ema(values, long_len, short_len):
+    first = manual_ema(values, long_len)
+    return manual_ema(first, short_len)
+
 
 def compute_tsi(df, long_len, short_len, signal_len):
-    pc = df["close"].diff()
-    tsi = 100 * (double_smooth(pc, long_len, short_len) /
-                 double_smooth(pc.abs(), long_len, short_len))
-    sig = ema(tsi, signal_len)
-    return tsi, sig
+    closes = df["close"].astype(float).to_list()
+    pc = [np.nan]
+    for i in range(1, len(closes)):
+        a = closes[i]
+        b = closes[i - 1]
+        pc.append(np.nan if (np.isnan(a) or np.isnan(b)) else a - b)
+
+    smoothed_pc = manual_double_ema(pc, long_len, short_len)
+    smoothed_abs_pc = manual_double_ema([abs(x) if not np.isnan(x) else np.nan for x in pc], long_len, short_len)
+
+    tsi_vals = _nan_list(len(closes))
+    for i in range(len(closes)):
+        num = smoothed_pc[i]
+        den = smoothed_abs_pc[i]
+        if np.isnan(num) or np.isnan(den) or den == 0:
+            continue
+        tsi_vals[i] = 100 * (num / den)
+
+    tsi_signal = manual_ema(tsi_vals, signal_len)
+    idx = df.index
+    return pd.Series(tsi_vals, index=idx), pd.Series(tsi_signal, index=idx)
+
 
 def compute_trend_filter(df, ma_length, ma_type, slope_lookback, min_slope):
-    ma = moving_average(df["close"], ma_length, ma_type)
-    slope = 100 * ((ma - ma.shift(slope_lookback)) / ma.shift(slope_lookback))
-    up = slope > min_slope
-    return ma, slope, up
+    closes = df["close"].astype(float).to_list()
+    ma_vals = manual_moving_average(closes, ma_length, ma_type)
+
+    slope_vals = _nan_list(len(ma_vals))
+    for i in range(len(ma_vals)):
+        prev_idx = i - slope_lookback
+        if prev_idx < 0:
+            continue
+        cur = ma_vals[i]
+        prev = ma_vals[prev_idx]
+        if np.isnan(cur) or np.isnan(prev) or prev == 0:
+            continue
+        slope_vals[i] = 100 * ((cur - prev) / prev)
+
+    is_up = [False if np.isnan(s) else s > min_slope for s in slope_vals]
+    idx = df.index
+    return (
+        pd.Series(ma_vals, index=idx),
+        pd.Series(slope_vals, index=idx),
+        pd.Series(is_up, index=idx),
+    )
+
 
 def compute_indicators(df, longLen=25, shortLen=13, signalLen=13,
                        maType="EMA", maLength=50,
